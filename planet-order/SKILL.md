@@ -1,23 +1,32 @@
 ---
 name: planet-order
-description: "Order satellite imagery from Planet Explorer via browser automation. Handles multi-scene AOI coverage, mosaics scenes into one PNG, sends via Telegram. Trigger: user sends a location name, AOI file (.geojson/.kml/.shp), or asks for Planet imagery for a location + date range."
-metadata: {"openclaw":{"requires":{"bins":["gdal_translate","gdalwarp","gdal_merge.py"]},"emoji":"🛰️"}}
+description: "Order satellite imagery from Planet Explorer via browser automation. Selects only scenes covering the specific AOI (not surrounding areas), clips to AOI, optionally crops to sub-area, sends PNG via Telegram. Trigger: user sends AOI file or location + date range."
+metadata: {"openclaw":{"requires":{"bins":["gdal_translate","gdalwarp","ogr2ogr"]},"emoji":"🛰️"}}
 ---
 
 # Planet Satellite Imagery Order Skill
 
-Orders the minimum set of Planet scenes needed to cover an AOI, mosaics them into one PNG, sends via Telegram. Goes idle after delivery.
+Orders only the scenes needed to cover a specific AOI, clips delivery to that AOI, crops further if requested, sends PNG via Telegram. Goes idle after.
 
-Credentials in environment: PL_EMAIL, PL_PASSWORD, TELEGRAM_BOT_TOKEN.
+Credentials in env: PL_EMAIL, PL_PASSWORD, TELEGRAM_BOT_TOKEN.
+
+---
+
+## Key Principle: Tight AOI = Lower Cost
+
+The AOI should be drawn tightly around exactly what is needed (e.g. just the airport terminal, not the surrounding farmland). Planet clips delivered imagery to this boundary. A smaller, precise AOI means:
+- Fewer scenes needed — scenes are only selected if they actually cover the AOI geometry, not just the bounding box
+- Smaller delivered files, lower cost
+- No irrelevant coverage (no "green stuff around it")
 
 ---
 
 ## Triggering
 
-Activate when user:
-- Sends an AOI file (.geojson, .kml, .zip shapefile) via Telegram
-- Mentions a location name + date range
-- Says "order imagery", "get Planet image", "satellite image for [location]"
+- User sends an AOI file (.geojson, .kml, .zip shapefile) via Telegram
+- User mentions a location name + date range
+- "Order imagery", "get Planet image", "satellite image for [location]"
+- "Crop last image to [coords]" — triggers crop-only on already-downloaded file
 
 ---
 
@@ -32,157 +41,132 @@ User can add: "Save location [name] at [coordinates or upload AOI]"
 
 ---
 
-## Input Parsing
-
-From user message extract:
-- **AOI**: file attachment (any format) OR named location OR coordinates
-- **Date range**: start and end dates (default: last 30 days if not given)
-- **Cloud cover max**: default 20% (be generous — if too strict, no results)
-
-If AOI is a file, save to `~/planet_orders/aoi/[name].[ext]` and convert to GeoJSON for processing.
-
----
-
 ## Step 1 — Convert AOI to GeoJSON
 
 If user sends a file:
-```bash
-# Convert KML → GeoJSON
-ogr2ogr -f GeoJSON aoi.geojson input.kml
-# Convert Shapefile → GeoJSON
-ogr2ogr -f GeoJSON aoi.geojson input.shp
-# GeoJSON → use directly
-cp input.geojson aoi.geojson
-```
 
-Extract bounding box from GeoJSON for Planet search.
+    ogr2ogr -f GeoJSON aoi.geojson input.kml     # KML
+    ogr2ogr -f GeoJSON aoi.geojson input.shp     # Shapefile
+    cp input.geojson aoi.geojson                  # GeoJSON direct
+
+Save to ~/planet_orders/aoi/[name].geojson
 
 ---
 
 ## Step 2 — Login to Planet Explorer
 
 - Navigate to https://www.planet.com/explorer/
-- If not logged in: click "Sign In", enter PL_EMAIL + PL_PASSWORD from env
-- Wait 10 seconds — heavy React SPA
-- Confirm login succeeded before continuing
+- Click Sign In if not logged in, use PL_EMAIL + PL_PASSWORD from env
+- Wait 10 seconds (heavy React SPA)
+- Confirm login before continuing
 
 ---
 
-## Step 3 — Search for Scenes
+## Step 3 — Search and Filter Scenes
 
-- Draw or set AOI on map (use coordinates from Step 1)
-- Set date range and cloud cover filter
-- Select: PlanetScope / PSScene, 3-band Visual (RGB)
-- Run search, wait for results to load
+- Set AOI on map using exact geometry from Step 1
+- Apply filters: date range, cloud cover <= max (default 20%), PlanetScope PSScene, 3-band Visual RGB
+- Run search and wait for results
 
 ---
 
-## Step 4 — Smart Scene Selection (COST CONTROL)
+## Step 4 — Select Only the Right Scenes (COST CONTROL)
 
-**Goal: minimum scenes to fully cover the AOI, from the best single day.**
+**Goal: fewest scenes covering the AOI from the best single day. Never order scenes that only cover surrounding areas.**
 
-1. **Group all results by acquisition date**
-2. **For each date**, check: do the scenes collectively cover ≥ 95% of the AOI?
-3. **Rank dates** by:
-   - Coverage of AOI (higher = better)
-   - Average cloud cover (lower = better)
-   - Recency (more recent = better, tiebreaker only)
-4. **Pick the best date**
-5. **Select only the scenes from that date** that intersect the AOI — no duplicates, no extras
-6. **Before ordering**, report to user via Telegram:
-   ```
-   🛰️ Found coverage for [location]
-   📅 Best date: [date]
-   🖼️ Scenes needed: [N] (to cover AOI fully)
-   ☁️ Avg cloud cover: [X]%
-   📦 Ordering now...
-   ```
+1. Only consider scenes that actually overlap the AOI geometry
+2. Group scenes by acquisition date
+3. For each date, find scenes that together cover >= 90% of the AOI
+4. Rank dates: coverage % (high to low) -> avg cloud cover (low to high) -> recency (tiebreaker)
+5. From the best date, select only the minimum scenes needed — skip any scene whose area is already covered by another selected scene
+6. Before ordering, report to user via Telegram:
 
-If no single date gives ≥ 95% coverage, pick the date with highest coverage and note the gap.
+    Found coverage for [location]
+    Best date: [YYYY-MM-DD]
+    Scenes to order: [N] (covers [X]% of AOI)
+    Avg cloud cover: [Y]%
+    Ordering now...
+
+If no date gives >= 90% coverage: notify user, report best available %, ask to proceed.
 
 ---
 
 ## Step 5 — Place Order
 
-- Click "Order" for each selected scene (or select all then order)
-- Order name: `DDMMYYYY_[LocationName]_[N]scenes`
+- Select the chosen scenes in Planet Explorer
+- Order name: DDMMYYYY_LocationName_Nsc
 - Bundle: Visual (RGB GeoTIFF)
-- Enable: **Clip to AOI** ← critical, reduces file size and cost
-- Confirm and submit
+- Enable: Clip to AOI (Planet clips delivery to your boundary — no surrounding areas in output)
+- Submit order
 
 ---
 
 ## Step 6 — Wait and Download
 
-- Go to Orders page
-- Poll every 30 seconds until all scenes status = "Success"
-- Download all GeoTIFFs to `~/planet_orders/[order_name]/`
+- Poll Orders page every 30s until status = Success
+- Download all GeoTIFFs to ~/planet_orders/[order_name]/
 - Timeout: 20 minutes
 
 ---
 
-## Step 7 — Mosaic and Export PNG
+## Step 7 — Post-Processing
+
+Planet delivers scenes already clipped to the AOI boundary.
 
 If 1 scene:
-```bash
-gdal_translate -of PNG -scale input.tif output.png
-```
 
-If multiple scenes — merge into one mosaic:
-```bash
-# Merge scenes into one GeoTIFF
-gdal_merge.py -o merged.tif scene1.tif scene2.tif scene3.tif
+    gdal_translate -of PNG -scale input.tif output.png
 
-# Clip to exact AOI bounding box
-gdalwarp -cutline aoi.geojson -crop_to_cutline merged.tif clipped.tif
+If multiple scenes:
 
-# Convert to PNG
-gdal_translate -of PNG -scale clipped.tif output.png
-```
+    gdalwarp -of GTiff scene1.tif scene2.tif merged.tif
+    gdal_translate -of PNG -scale merged.tif output.png
 
-Output: `~/planet_orders/[order_name]/[order_name].png`
+### Cropping to Sub-Area (Optional)
+
+User can request a crop at any time — either during the order or afterwards:
+- "Crop last image to [lon1,lat1,lon2,lat2]"
+- "Crop to this area" + attach a GeoJSON file
+- "Crop to just the terminal / northern section / etc."
+
+Crop by bounding box:
+
+    gdal_translate -projwin <ulx> <uly> <lrx> <lry> -of PNG -scale input.tif cropped.png
+
+Crop by polygon (e.g. just the terminal building):
+
+    gdalwarp -cutline sub_aoi.geojson -crop_to_cutline input.tif clipped.tif
+    gdal_translate -of PNG -scale clipped.tif cropped.png
+
+Output: [order_name]_cropped.png — send via Telegram the same as the main output.
 
 ---
 
 ## Step 8 — Send PNG via Telegram
 
-Send the PNG as a Telegram document (supports any file size, any format):
-```bash
-curl -s \
-  -F "chat_id=[USER_CHAT_ID]" \
-  -F "document=@output.png" \
-  -F "caption=🛰️ [order_name] | [location] | [date] | [N] scenes | ☁️ [X]% cloud" \
-  "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument"
-```
+    curl -s \
+      -F "chat_id=CHAT_ID" \
+      -F "document=@output.png" \
+      -F "caption=ORDER_NAME | DATE | N scenes | CLOUD% cloud | WxH px" \
+      "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument"
 
-If PNG > 50MB: split into tiles or reduce resolution first:
-```bash
-convert -resize 50% output.png output_small.png
-```
+If PNG > 50MB: compress first with ImageMagick: convert -resize 50% output.png output.png
 
 ---
 
 ## Step 9 — Confirm and Go Idle
 
-Send summary to Telegram:
-- Order name, acquisition date, cloud cover %
-- Number of scenes mosaicked
-- Output file size
-- "Done. Ready for next request."
-
-Then go fully idle. No background polling, no scheduled tasks.
+Send summary: order name, date, cloud cover, scenes ordered, file size, pixel dimensions.
+"Done. Send another AOI or crop request anytime."
+Go fully idle — no background tasks.
 
 ---
 
 ## Error Handling
 
-| Error | Action |
-|-------|--------|
-| No scenes found | Expand cloud cover to 30%, expand date range by 14 days, retry once |
-| AOI coverage < 50% | Notify user, ask if they want to proceed with partial coverage |
-| Login fails | Notify user on Telegram: "Check Planet credentials" |
-| Order fails | Report Planet error message on Telegram |
-| Download timeout (>20min) | Notify user, retry once |
-| PNG > 50MB | Compress to 50% resolution before sending |
-| Mosaic fails | Send individual scene files separately |
-
+- No scenes found: expand cloud cover to 30%, extend date range +/-14 days, retry once
+- Coverage < 90%: notify user, report best available, ask to proceed
+- Login fails: notify user to check Planet credentials
+- Order fails: report Planet error message
+- Timeout > 20min: notify user with order link to check manually
+- PNG > 50MB: compress to 50% resolution and resend
