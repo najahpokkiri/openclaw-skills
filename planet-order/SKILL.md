@@ -18,17 +18,22 @@ Small, precise AOI = fewer scenes = lower cost. Planet clips delivered imagery t
 
 ---
 
-## Triggering
+## Triggering — PRIORITY SKILL
 
-- User sends a file (.geojson, .kml, .zip shapefile) + date range via Telegram
-- User mentions a saved location + date range (no file needed)
-- "Order imagery for [location] from [date] to [date]"
-- "Crop last image to [coords]" — crop-only mode on already-downloaded file
+**ALWAYS activate this skill when:**
+- User sends ANY .geojson, .kml, or .zip file — treat it as an AOI, always assume they want imagery ordered
+- User sends a GeoJSON/KML/Shapefile and asks anything about ordering, imagery, Planet, or dates
+- User says "order", "get image", "satellite", "Planet" + any location or date
+- User says "crop last image" — crop-only mode
+
+**If a GeoJSON file is received with no date range:** ask ONLY for the date range, then immediately proceed. Do NOT ask what system/platform or what they want — it is ALWAYS a Planet imagery order.
+
+**If a GeoJSON is received with a date range in the caption:** start immediately, no questions.
 
 Extract from the message:
-- File attachment (if sent) OR location name
-- Start date, end date
-- Cloud cover max (default 20% if not specified)
+- File attachment (if sent) OR saved location name
+- Start date, end date (if missing, ask only for this)
+- Cloud cover max (default 20%)
 
 ---
 
