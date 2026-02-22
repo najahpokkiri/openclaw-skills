@@ -6,9 +6,20 @@ metadata: {"openclaw":{"requires":{"bins":["gdal_translate","gdalwarp","ogr2ogr"
 
 # Planet Satellite Imagery Order Skill
 
-Receives AOI from Telegram → uploads to Planet Explorer → selects right scenes → orders → delivers PNG via Telegram.
+Receives AOI from Telegram → uploads to Planet Explorer → selects right scenes → orders → polls until ready → downloads → converts to PNG → sends via Telegram.
 
 Credentials in env: PL_EMAIL, PL_PASSWORD, TELEGRAM_BOT_TOKEN.
+
+---
+
+## Output Rules
+
+- Do NOT send screenshots, status updates, or progress messages to Telegram while working
+- Work silently. The user sees nothing until PNG is ready.
+- Only 2 messages total:
+  1. Pre-order notice: "Found N scenes for [location] on [date], X% cloud. Ordering..."
+  2. Final: send the PNG file with caption
+- Exception: if waiting >10 min, send ONE "Still processing, Planet order in queue..." message
 
 ---
 
@@ -21,19 +32,13 @@ Small, precise AOI = fewer scenes = lower cost. Planet clips delivered imagery t
 ## Triggering — PRIORITY SKILL
 
 **ALWAYS activate this skill when:**
-- User sends ANY .geojson, .kml, or .zip file — treat it as an AOI, always assume they want imagery ordered
-- User sends a GeoJSON/KML/Shapefile and asks anything about ordering, imagery, Planet, or dates
+- User sends ANY .geojson, .kml, or .zip file — always assume they want imagery ordered
 - User says "order", "get image", "satellite", "Planet" + any location or date
 - User says "crop last image" — crop-only mode
+- User says "check my Planet orders" or "download completed orders"
 
-**If a GeoJSON file is received with no date range:** ask ONLY for the date range, then immediately proceed. Do NOT ask what system/platform or what they want — it is ALWAYS a Planet imagery order.
-
-**If a GeoJSON is received with a date range in the caption:** start immediately, no questions.
-
-Extract from the message:
-- File attachment (if sent) OR saved location name
-- Start date, end date (if missing, ask only for this)
-- Cloud cover max (default 20%)
+**If a GeoJSON is received with no date range:** ask ONLY for the date range, then proceed immediately.
+**If a GeoJSON is received with a date range:** start immediately, no questions.
 
 ---
 
@@ -44,86 +49,60 @@ Extract from the message:
 | Isa Town | 50.54, 25.92 | 50.56, 25.94 |
 | Isa Bahrain | 50.5, 26.1 | 50.65, 26.25 |
 
-User can add: "Save location [name] at [coordinates or upload AOI]"
-
 ---
 
 ## Step 1 — Download AOI File from Telegram
 
-When user sends a file attachment via Telegram, OpenClaw passes the message with a file_id.
-Download it using the Telegram Bot API:
-
-    # 1. Get the file path from Telegram
-    curl -s "https://api.telegram.org/bot/getFile?file_id=FILE_ID_HERE"
+    # Get file path from Telegram
+    curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getFile?file_id=FILE_ID"
     # Returns: { "result": { "file_path": "documents/file_123.geojson" } }
 
-    # 2. Download the actual file
-    curl -s -o /home/openclaw/planet_orders/aoi/incoming.geojson       "https://api.telegram.org/file/bot/documents/file_123.geojson"
+    # Download file
+    curl -s -o /home/openclaw/planet_orders/aoi/incoming.geojson       "https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/documents/file_123.geojson"
 
-Save to: ~/planet_orders/aoi/[location_name].geojson
-
-Convert to GeoJSON if needed:
-
-    ogr2ogr -f GeoJSON aoi.geojson input.kml      # KML
-    ogr2ogr -f GeoJSON aoi.geojson input.shp      # Shapefile from .zip (extract first)
+Convert if needed:
+    ogr2ogr -f GeoJSON aoi.geojson input.kml    # KML
+    ogr2ogr -f GeoJSON aoi.geojson input.shp    # Shapefile
     # GeoJSON: use directly
-
-If user gave a saved location name instead of a file, create a bounding box GeoJSON from saved coordinates.
 
 ---
 
 ## Step 2 — Login to Planet Explorer
 
 - Open https://www.planet.com/explorer/ in headless browser
-- Click Sign In if not logged in
-- Enter PL_EMAIL, PL_PASSWORD from env
+- Click Sign In if not logged in; enter PL_EMAIL + PL_PASSWORD from env
 - Wait 10 seconds (heavy React SPA)
-- Confirm you are on the explorer map before continuing
+- Confirm logged in before continuing
 
 ---
 
-## Step 3 — Upload AOI File to Planet Explorer
+## Step 3 — Upload AOI to Planet Explorer
 
-Planet Explorer has an AOI import button — use it to upload the GeoJSON directly:
-
-1. Look for the AOI/draw toolbar on the map (top-left or right panel)
-2. Find the "Upload" or "Import AOI" button (folder icon or upload icon near the draw tools)
-3. Click it — it opens a file input dialog
-4. Use Playwright to set the file on the input element:
-
-       const [fileChooser] = await Promise.all([
-         page.waitForEvent('filechooser'),
-         page.click('[data-testid="upload-aoi"]'  // or the upload button selector)
-       ]);
-       await fileChooser.setFiles('/home/openclaw/planet_orders/aoi/aoi.geojson');
-
-5. Wait for the AOI to appear on the map (polygon outline visible)
-6. Confirm the AOI boundary matches what was sent
-
-If the file chooser approach does not work, fall back to drawing the bounding box manually using the draw rectangle tool and the AOI's bounding box coordinates.
+1. Find the AOI upload/import button in the map toolbar (folder icon near draw tools)
+2. Click it to open file input, upload the GeoJSON using the browser upload tool:
+   `openclaw browser upload /home/openclaw/planet_orders/aoi/aoi.geojson`
+3. Wait for AOI polygon to appear on map
+4. Fallback: draw bounding box manually using the rectangle draw tool
 
 ---
 
 ## Step 4 — Apply Filters and Search
 
 - Set date range from user message
-- Cloud cover <= max (default 20%)
-- Imagery type: PlanetScope / PSScene
-- Product: 3-band Visual (RGB)
+- Cloud cover <= 20% (default)
+- Imagery type: PlanetScope / PSScene, 3-band Visual RGB
 - Run search and wait for results
 
 ---
 
-## Step 5 — Select Only the Right Scenes (COST CONTROL)
+## Step 5 — Select Scenes (COST CONTROL)
 
-**Goal: fewest scenes from the best single day that cover >= 90% of the AOI.**
+**Goal: fewest scenes from best single day covering >= 90% of AOI.**
 
-1. Only consider scenes that actually overlap the AOI geometry (not just bounding box)
-2. Group scenes by acquisition date
-3. For each date, check which scenes together cover >= 90% of AOI
-4. Rank dates: coverage % (desc) → avg cloud cover (asc) → recency (tiebreaker)
-5. Select minimum scenes from best date — skip any scene whose area is already covered
-6. Notify user via Telegram before ordering:
+1. Only scenes that actually intersect AOI geometry
+2. Group by date; find minimum scenes for >= 90% coverage
+3. Rank: coverage % desc → cloud cover asc → recency
+4. Notify user before ordering:
 
        Found coverage for [location]
        Best date: [YYYY-MM-DD]
@@ -131,78 +110,94 @@ If the file chooser approach does not work, fall back to drawing the bounding bo
        Avg cloud cover: [Y]%
        Ordering now...
 
-If no date gives >= 90%: notify user, report best available %, ask to proceed.
-
 ---
 
 ## Step 6 — Place Order
 
-- Select chosen scenes in Planet Explorer
-- Order name: DDMMYYYY_LocationName_Nsc
+- Select chosen scenes
+- Order name format: DDMMYYYY_LocationName_Nsc  (e.g. 20022026_IsaTownTest_2sc)
 - Bundle: Visual (RGB GeoTIFF)
-- **Enable: Clip to AOI** — this is critical, Planet clips delivery to your uploaded boundary
+- **Enable: Clip to AOI**
 - Submit order
+- Note the order ID and order URL from the confirmation
 
 ---
 
-## Step 7 — Wait and Download
+## Step 7 — Poll Until Ready and Download (DO NOT STOP UNTIL DONE)
 
-- Go to Orders page, poll every 30s until status = Success
-- Download all delivered GeoTIFFs to ~/planet_orders/[order_name]/
-- Timeout: 20 minutes — if exceeded, notify user with order page link
+After ordering, Planet redirects to the order detail page:
+  https://insights.planet.com/data/orders/[ORDER-ID]
+
+**Poll this page every 30 seconds:**
+1. Take a browser snapshot of https://insights.planet.com/data/orders/[ORDER-ID]
+2. Look for status indicators: "success", "complete", "ready", "Download", green checkmark
+3. Also check https://www.planet.com/account/#/orders for the order list status
+
+**When order shows as complete/success:**
+1. Find the Download button or download links on the order page
+2. Click Download — Planet provides a zip file or individual GeoTIFF links
+3. Use `openclaw browser waitfordownload` or `openclaw browser download` to save the file
+4. Files save to: ~/planet_orders/[order_name]/
+
+**Alternative download via curl using browser cookies:**
+If clicking download does not work, extract cookies and use curl:
+    # Get cookies via openclaw browser cookies command
+    # Then: curl -b "cookie_string" -L "download_url" -o output.zip
+
+**Timeout: 20 minutes.** If exceeded, notify user with the order URL to check manually.
+
+**NEVER go idle while waiting. Poll continuously. Do not wait for the user to check in.**
 
 ---
 
 ## Step 8 — Process to PNG
 
-Planet delivers files already clipped to the AOI boundary.
-
-If 1 scene:
-
+    # Single scene:
     gdal_translate -of PNG -scale input.tif output.png
 
-If multiple scenes (mosaic):
-
+    # Multiple scenes (mosaic):
     gdalwarp -of GTiff scene1.tif scene2.tif merged.tif
     gdal_translate -of PNG -scale merged.tif output.png
 
-### Crop to Sub-Area (Optional)
-
-User can send "Crop last image to [coords]" or attach a sub-AOI GeoJSON at any time.
-
-Crop by bounding box:
-
-    gdal_translate -projwin <ulx> <uly> <lrx> <lry> -of PNG -scale input.tif cropped.png
-
-Crop by polygon:
-
-    gdalwarp -cutline sub_aoi.geojson -crop_to_cutline input.tif clipped.tif
-    gdal_translate -of PNG -scale clipped.tif cropped.png
+    # If downloaded as zip:
+    unzip order.zip -d ~/planet_orders/[order_name]/
 
 ---
 
 ## Step 9 — Send PNG via Telegram
 
-    curl -s       -F "chat_id=CHAT_ID"       -F "document=@output.png"       -F "caption=ORDER_NAME | DATE | N scenes | CLOUD% cloud | WxH px"       "https://api.telegram.org/bot/sendDocument"
+    curl -s       -F "chat_id=CHAT_ID"       -F "document=@output.png"       -F "caption=ORDER_NAME | DATE | N scenes | CLOUD% cloud | WxH px"       "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument"
 
-If PNG > 50MB: compress first with ImageMagick: convert -resize 50% output.png output.png
+If PNG > 50MB: `convert -resize 50% output.png output.png`
 
 ---
 
 ## Step 10 — Confirm and Go Idle
 
-Send summary: order name, date, cloud cover, scenes, file size, pixel dimensions.
-"Done. Send another AOI or crop request anytime."
-Go fully idle — no background tasks.
+Send summary: order name, date, cloud cover, scenes, file size, dimensions.
+Then go fully idle.
+
+---
+
+## Crop Mode (any time)
+
+User sends "Crop last image to [coords]" or attaches a sub-AOI:
+
+    # Bounding box crop:
+    gdal_translate -projwin <ulx> <uly> <lrx> <lry> -of PNG -scale input.tif cropped.png
+
+    # Polygon crop:
+    gdalwarp -cutline sub.geojson -crop_to_cutline input.tif clipped.tif
+    gdal_translate -of PNG -scale clipped.tif cropped.png
 
 ---
 
 ## Error Handling
 
-- File download from Telegram fails: ask user to resend the file
-- AOI upload to Planet fails: fall back to drawing bounding box from AOI coordinates manually
+- AOI upload fails: draw bounding box manually from AOI coordinates
 - No scenes found: expand cloud cover to 30%, extend date range +/-14 days, retry once
 - Coverage < 90%: notify user, report best %, ask to proceed
-- Login fails: notify user to check Planet credentials in .env
-- Order timeout > 20min: notify user with order link to check manually
-- PNG > 50MB: compress to 50% resolution and resend
+- Login fails: notify user to check credentials
+- Download button not found: try navigating directly to insights.planet.com/data/orders/[ID]
+- Order timeout > 20 min: notify user with order URL
+- PNG > 50MB: compress and resend
