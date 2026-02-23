@@ -6,7 +6,7 @@ metadata: {"openclaw":{"requires":{"bins":["gdal_translate","gdalwarp","ogr2ogr"
 
 # Planet Satellite Imagery Order Skill
 
-Receives AOI from Telegram → uploads to Planet Explorer → selects right scenes → **visually checks cloud cover over AOI** → orders → polls until ready → downloads → converts to PNG → sends via Telegram.
+Receives AOI from Telegram → uploads to Planet Explorer → selects right scenes → **visually checks cloud cover over target facility** → orders clipped to facility → polls until ready → downloads → converts to PNG → sends via Telegram.
 
 Credentials in env: PL_EMAIL, PL_PASSWORD, TELEGRAM_BOT_TOKEN.
 
@@ -16,17 +16,17 @@ Credentials in env: PL_EMAIL, PL_PASSWORD, TELEGRAM_BOT_TOKEN.
 
 - Work silently while doing setup and scene search
 - **Allowed messages:**
-  1. Pre-order notice (before placing order): scene cloud % + estimated AOI cloud %, date, scene count
+  1. Pre-order notice (before placing order): scene cloud % + estimated facility cloud %, date, scene count
   2. Every 5 minutes during polling: one brief status update (see Step 7)
   3. Final: send the PNG file with caption
-- If no clear date found: message user with best AOI cloud estimate and ask to confirm before ordering
+- If no clear date found: message user with best facility cloud estimate and ask to confirm before ordering
 - Do NOT send screenshots to the user
 
 ---
 
-## Key Principle: Tight AOI = Lower Cost
+## Key Principle: Clip to Facility, Not the Whole AOI
 
-Small, precise AOI = fewer scenes = lower cost. Planet clips delivered imagery to your AOI boundary.
+The AOI file may include surrounding land, trees, or buffer zones the user does not care about. The target is the **facility or structure** inside the AOI — an airport, building complex, industrial site, etc. All cloud checks and all clips must focus on that target, ignoring irrelevant surrounding area.
 
 ---
 
@@ -97,37 +97,40 @@ Convert if needed:
 
 ---
 
-## Step 5 — Select Scenes (COST CONTROL + AOI CLOUD CHECK)
+## Step 5 — Select Scenes (COST CONTROL + FACILITY CLOUD CHECK)
 
-**Goal: fewest scenes from best single day covering >= 90% of AOI, with clear sky over the AOI itself.**
+**Goal: fewest scenes from best single day covering >= 90% of AOI, with clear sky over the target facility itself.**
 
 ### 5a — Group and rank candidate dates
 1. Only scenes that actually intersect AOI geometry
 2. Group by date; find minimum scenes for >= 90% coverage
 3. Rank: coverage % desc → scene cloud % asc → recency
 
-### 5b — Visual AOI cloud check (MANDATORY for each candidate date)
+### 5b — Visual facility cloud check (MANDATORY for each candidate date)
 
-Planet's scene-level cloud % covers the whole tile, not just your AOI. You MUST visually verify.
+Planet's scene-level cloud % covers the whole tile, not just your target. You MUST visually verify.
+
+**Important:** The AOI may be a large polygon containing surrounding trees, fields, or open land. You only care about the **primary target facility** (airport, building complex, industrial site, etc.) visible within the AOI. Clouds over surrounding vegetation or non-target land do NOT count.
 
 For each top candidate date (up to 3):
 1. Click the scene in Planet Explorer to select/preview it
-2. Zoom the map to the AOI bounding box so the AOI fills the viewport
+2. Zoom the map to the AOI bounding box so the target facility fills the viewport
 3. Take a browser screenshot of the map at this zoom level
-4. Visually estimate what percentage of the **AOI area** is obscured by cloud or cloud shadow
-5. Record: date, scene cloud %, estimated AOI cloud %
+4. Visually locate the **primary target structure/facility** within the AOI
+5. Estimate what percentage of the **target facility itself** is obscured by cloud or cloud shadow — ignore cloud over surrounding land, trees, or fields
+6. Record: date, scene cloud %, estimated facility cloud %
 
-**Decision rule:**
-- AOI cloud estimate < 30%: ✅ proceed with this date
-- AOI cloud estimate 30–70%: ⚠️ borderline — prefer a clearer date if available
-- AOI cloud estimate > 70%: ❌ skip this date, try next candidate
+**Decision rule (cloud over target facility only):**
+- Facility cloud estimate < 30%: ✅ proceed with this date
+- Facility cloud estimate 30–70%: ⚠️ borderline — prefer a clearer date if available
+- Facility cloud estimate > 70%: ❌ skip this date, try next candidate
 
-**If all candidates have AOI cloud > 70%:**
-- Pick the date with the lowest AOI cloud estimate
+**If all candidates have facility cloud > 70%:**
+- Pick the date with the lowest facility cloud estimate
 - Message the user:
   ```
   ⚠️ Best available date: [YYYY-MM-DD]
-  Scene cloud: [X]% | Estimated AOI cloud: [Y]%
+  Scene cloud: [X]% | Estimated facility cloud: [Y]%
   No fully clear date found in range. Proceed anyway? (reply yes/no)
   ```
 - Wait for user confirmation before ordering
@@ -138,17 +141,25 @@ For each top candidate date (up to 3):
     Best date: [YYYY-MM-DD]
     Scenes to order: [N] (covers [X]% of AOI)
     Scene cloud cover: [Y]%
-    Estimated AOI cloud cover: [Z]%
+    Estimated facility cloud cover: [Z]%
     Ordering now...
 
 ---
 
-## Step 6 — Place Order
+## Step 6 — Place Order (Clip to Facility Only)
 
+The delivered imagery must show the **facility only**, not surrounding trees or buffer land.
+
+**Before placing the order:**
+- Look at the uploaded AOI geometry
+- If the AOI is already a tight polygon around the facility: use it as-is for the clip
+- If the AOI is a large bounding box or includes significant surrounding area: draw a tighter polygon in Planet Explorer around just the facility footprint, and use that as the clip geometry for this order
+
+**Order settings:**
 - Select chosen scenes
 - Order name format: DDMMYYYY_LocationName_Nsc  (e.g. 20022026_IsaTownTest_2sc)
 - Bundle: Visual (RGB GeoTIFF)
-- **Enable: Clip to AOI**
+- **Enable: Clip to AOI** (using the facility-tight polygon, not a loose bounding box)
 - Submit order
 - Note the order ID and order URL from the confirmation
 - Record the order start time (for elapsed time tracking in Step 7)
@@ -191,12 +202,22 @@ If clicking download does not work, extract cookies and use curl:
 
 ## Step 8 — Process to PNG
 
-    # Single scene:
-    gdal_translate -of PNG -scale input.tif output.png
+After downloading, clip the GeoTIFF tightly to the facility polygon before converting, to strip any residual surrounding area:
 
-    # Multiple scenes (mosaic):
+    # Clip to facility polygon (remove surrounding land/trees):
+    gdalwarp -cutline /home/openclaw/planet_orders/aoi/aoi.geojson \
+             -crop_to_cutline -dstalpha \
+             input.tif clipped.tif
+
+    # Convert to PNG:
+    gdal_translate -of PNG -scale clipped.tif output.png
+
+    # Multiple scenes (mosaic first, then clip):
     gdalwarp -of GTiff scene1.tif scene2.tif merged.tif
-    gdal_translate -of PNG -scale merged.tif output.png
+    gdalwarp -cutline /home/openclaw/planet_orders/aoi/aoi.geojson \
+             -crop_to_cutline -dstalpha \
+             merged.tif clipped.tif
+    gdal_translate -of PNG -scale clipped.tif output.png
 
     # If downloaded as zip:
     unzip order.zip -d ~/planet_orders/[order_name]/
@@ -217,7 +238,7 @@ If PNG > 50MB: `convert -resize 50% output.png output.png`
 
 ## Step 10 — Confirm and Go Idle
 
-Send summary: order name, date, scene cloud %, AOI cloud %, scenes, file size, dimensions.
+Send summary: order name, date, scene cloud %, facility cloud %, scenes, file size, dimensions.
 Then go fully idle.
 
 ---
