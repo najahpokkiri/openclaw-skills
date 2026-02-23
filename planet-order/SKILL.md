@@ -196,17 +196,34 @@ Confirm `"file"` matches current AOI. If not → STOP, send mismatch error.
 3. Rank: coverage % desc → scene cloud % asc → most recent
 4. Pick the top date
 
-**If best date has cloud > 50%:**
-Send: `"⚠️ Best available: [DATE], [X]% scene cloud. No clear date found. Proceed? (yes/no)"`
-Wait for confirmation before ordering.
+### 5b — Visual cloud check over AOI (MANDATORY for each candidate date)
 
-**Pre-order message:**
-```
-Found coverage for [location]
-Best date: [YYYY-MM-DD]
-Scenes: [N] (covers [X]% of AOI)
-Scene cloud: [Y]%
-Ordering now...
+For the top 1–2 candidate dates, while still in Planet Explorer:
+1. Click the scene to select/highlight it on the map
+2. Zoom the map so the AOI polygon fills the viewport
+3. Take a screenshot: `openclaw browser screenshot /tmp/cloud-check.png`
+4. Inspect ONLY the area inside the AOI polygon:
+   - Estimate % of AOI covered by cloud or cloud shadow
+   - Ignore clouds over land outside the AOI boundary
+5. Decision:
+   - AOI cloud < 40% → ✅ proceed with this date
+   - AOI cloud 40–70% → ⚠️ try next candidate; if none better, ask user
+   - AOI cloud > 70% → ❌ skip, try next candidate date
+6. If all candidate dates have AOI cloud ≥ 40%:
+   - Pick lowest AOI cloud date
+   - Send screenshot + message: `"⚠️ Best available: [DATE], ~[X]% cloud over your AOI. See preview — proceed? (yes/no)"`
+   - Wait for user reply before ordering
+
+### 5c — Pre-order notice (include screenshot)
+
+Send the cloud-check screenshot so the user can visually confirm before the order is placed:
+
+```bash
+curl -s \
+  -F "chat_id=CHAT_ID" \
+  -F "photo=@/tmp/cloud-check.png" \
+  -F "caption=✅ [location] | [DATE] | [N] scenes | ~[X]% cloud over AOI | Ordering now..." \
+  "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto"
 ```
 
 ---
