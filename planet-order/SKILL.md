@@ -27,7 +27,7 @@ Credentials in env: `PL_EMAIL`, `PL_PASSWORD`, `PL_API_KEY`, `TELEGRAM_BOT_TOKEN
 11. **ALWAYS ORDER VISUAL BUNDLE — NEVER ANALYTIC.** In Planet Explorer order dialog, select bundle labeled **"Visual"** or **"Basic RGB"** (3-band GeoTIFF). NEVER select Analytic, Analytic SR, Multispectral, UDM2, or any other bundle. If uncertain, look for the option that says "Visual" explicitly.
 12. **NEVER WRITE CUSTOM SCRIPTS.** Do not create `poll_and_process.py`, `download.py`, or any other Python/shell scripts. Use only the commands shown in this SKILL.md. Use `clip_order.py` for all local processing.
 13. **POLL AND DOWNLOAD VIA PLANET API — NOT THE BROWSER.** After placing the order, use `curl` with `PL_API_KEY` to poll and download. Do not use the browser to find a Download button.
-14. **AFTER STEP 9c (CATBOX URL SENT) — STOP. SESSION COMPLETE.** Write `done=true` to `current-session.json` (as shown in Step 10). Do not process any further messages or context from this session. If you find yourself re-reading a prior date range or AOI — STOP. The session is closed. Wait for a new file attachment.
+14. **AFTER STEP 9c (CATBOX URL SENT) — STOP. SESSION COMPLETE.** `done=true` is written to `current-session.json` at Step 9a (immediately after catbox upload). Do not process any further messages or context from this session. If you find yourself re-reading a prior date range or AOI — STOP. The session is closed. Wait for a new file attachment.
 
 ---
 
