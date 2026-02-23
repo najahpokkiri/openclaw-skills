@@ -391,6 +391,13 @@ CATBOX_URL=$(curl -4 -s \
   -F "fileToUpload=@/home/openclaw/planet_orders/output/${ORDER_NAME}.png" \
   -F "reqtype=fileupload" \
   https://catbox.moe/user/api.php)
+
+# Write done=true IMMEDIATELY after catbox upload — before sending anything to Telegram
+printf '{"done":true,"order":"%s","completed_at":"%s"}\n' \
+  "$ORDER_NAME" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  > /home/openclaw/.openclaw/workspace/current-session.json.tmp \
+  && mv /home/openclaw/.openclaw/workspace/current-session.json.tmp \
+        /home/openclaw/.openclaw/workspace/current-session.json
 ```
 
 ### 9b — Send PNG
@@ -437,7 +444,7 @@ convert -resize 50% /home/openclaw/planet_orders/output/${ORDER_NAME}.png \
 
 ---
 
-## Step 10 — Log + Close Session
+## Step 10 — Log Order
 
 ```bash
 python3 -c "
@@ -462,12 +469,6 @@ entries.append({
 json.dump(entries, open(tmp, 'w'), indent=2)
 os.replace(tmp, log)
 "
-
-printf '{"done":true,"order":"%s","completed_at":"%s"}\n' \
-  "$ORDER_NAME" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  > /home/openclaw/.openclaw/workspace/current-session.json.tmp \
-  && mv /home/openclaw/.openclaw/workspace/current-session.json.tmp \
-        /home/openclaw/.openclaw/workspace/current-session.json
 ```
 
 ---
