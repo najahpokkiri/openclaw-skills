@@ -125,15 +125,21 @@ Convert if needed:
     ogr2ogr -f GeoJSON aoi.geojson input.kml    # KML
     ogr2ogr -f GeoJSON aoi.geojson input.shp    # Shapefile
     # If multi-feature GeoJSON: extract FIRST feature only (always overwrites — no stale AOI)
-    python3 -c "
+    MULTI_AOI=$(python3 -c "
 import json, sys
 raw = json.load(open('/home/openclaw/planet_orders/aoi/incoming.geojson'))
+n = 1
 if raw.get('type') == 'FeatureCollection' and len(raw['features']) > 1:
     n = len(raw['features'])
     raw['features'] = raw['features'][:1]
-    print(f'WARNING: multi-AOI file — {n} AOIs, using first only', file=sys.stderr)
 json.dump(raw, open('/home/openclaw/planet_orders/aoi/aoi.geojson', 'w'))
-"
+print(n)
+")
+    if [ "${MULTI_AOI:-1}" -gt "1" ] 2>/dev/null; then
+      curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        -d "chat_id=CHAT_ID" \
+        -d "text=⚠️ Your file had ${MULTI_AOI} AOIs — only the first one will be ordered."
+    fi
 
 **After AOI is saved, send (via curl):**
     curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
@@ -315,10 +321,11 @@ Full scenes are stored locally. Mosaic all scenes first (fills any gaps between 
     # Mosaic + clip to AOI + convert to PNG via Python helper.
     # Handles: path drift (searches both ~/planet_orders/output/NAME and ~/planet_orders/NAME),
     # zip extraction, recursive TIF find (PSScene/SCENE_ID/ nesting), gdalwarp + gdal_translate.
-    PNG_PATH=$(python3 /home/openclaw/planet_orders/clip_order.py \
+    if ! PNG_PATH=$(python3 /home/openclaw/planet_orders/clip_order.py \
       "[ORDER_NAME]" \
-      /home/openclaw/planet_orders/aoi/aoi.geojson)
-    [ $? -ne 0 ] && { echo "ERROR: clip_order.py failed — check stderr above"; exit 1; }
+      /home/openclaw/planet_orders/aoi/aoi.geojson); then
+      echo "ERROR: clip_order.py failed — check stderr above"; exit 1
+    fi
 
 **Why this approach:**
 - `clip_order.py` searches `~/planet_orders/output/NAME/` and `~/planet_orders/NAME/` — handles agent path drift
