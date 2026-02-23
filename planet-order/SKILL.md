@@ -226,13 +226,22 @@ After downloading, clip the GeoTIFF tightly to the facility polygon before conve
 
 ## Step 9 — Send PNG via Telegram
 
+**IMPORTANT: OpenClaw only allows sending local files from the workspace directory.**
+Always copy the final PNG there before sending:
+
+    cp output.png /home/openclaw/.openclaw/workspace/output.png
+
+Then send using the openclaw message tool with the workspace path, or via curl:
+
     curl -s \
       -F "chat_id=CHAT_ID" \
-      -F "document=@output.png" \
+      -F "document=@/home/openclaw/.openclaw/workspace/output.png" \
       -F "caption=ORDER_NAME | DATE | N scenes | CLOUD% cloud | WxH px" \
       "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument"
 
-If PNG > 50MB: `convert -resize 50% output.png output.png`
+If PNG > 50MB: compress first, then re-copy:
+
+    convert -resize 50% output.png output.png && cp output.png /home/openclaw/.openclaw/workspace/output.png
 
 ---
 
