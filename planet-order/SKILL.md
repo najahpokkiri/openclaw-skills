@@ -211,8 +211,15 @@ For the top 1–2 candidate dates, while still in Planet Explorer:
    - AOI cloud > 70% → ❌ skip, try next candidate date
 6. If all candidate dates have AOI cloud ≥ 40%:
    - Pick lowest AOI cloud date
-   - Send screenshot + message: `"⚠️ Best available: [DATE], ~[X]% cloud over your AOI. See preview — proceed? (yes/no)"`
-   - Wait for user reply before ordering
+   - Send screenshot with warning via `sendPhoto`:
+     ```bash
+     curl -s \
+       -F "chat_id=CHAT_ID" \
+       -F "photo=@/tmp/cloud-check.png" \
+       -F "caption=⚠️ Best available: [DATE] | ~[X]% cloud over AOI | Proceed? (reply yes/no)" \
+       "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto"
+     ```
+   - Wait for user reply before proceeding to Step 6
 
 ### 5c — Pre-order notice (include screenshot)
 
