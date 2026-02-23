@@ -124,8 +124,16 @@ Replace `<FILENAME_FROM_TELEGRAM>` with the exact filename attached to the most 
 Convert if needed:
     ogr2ogr -f GeoJSON aoi.geojson input.kml    # KML
     ogr2ogr -f GeoJSON aoi.geojson input.shp    # Shapefile
-    cp /home/openclaw/planet_orders/aoi/incoming.geojson \
-      /home/openclaw/planet_orders/aoi/aoi.geojson    # GeoJSON: copy to canonical name
+    # If multi-feature GeoJSON: extract FIRST feature only (always overwrites — no stale AOI)
+    python3 -c "
+import json, sys
+raw = json.load(open('/home/openclaw/planet_orders/aoi/incoming.geojson'))
+if raw.get('type') == 'FeatureCollection' and len(raw['features']) > 1:
+    n = len(raw['features'])
+    raw['features'] = raw['features'][:1]
+    print(f'WARNING: multi-AOI file — {n} AOIs, using first only', file=sys.stderr)
+json.dump(raw, open('/home/openclaw/planet_orders/aoi/aoi.geojson', 'w'))
+"
 
 **After AOI is saved, send (via curl):**
     curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
@@ -299,37 +307,23 @@ If clicking download does not work, extract cookies and use curl:
 
 Full scenes are stored locally. Mosaic all scenes first (fills any gaps between tiles), then clip to AOI, then convert to PNG. The output PNG is named after the order.
 
-    ORDER_DIR=~/planet_orders/[ORDER_NAME]
-    SCENES_DIR=$ORDER_DIR/scenes
-    AOI=/home/openclaw/planet_orders/aoi/aoi.geojson
-
-    # Extract zip if present (Planet delivers as output.zip; -o overwrites without prompting)
-    [ -f "$ORDER_DIR/output.zip" ] && unzip -o "$ORDER_DIR/output.zip" -d "$SCENES_DIR/"
-
-    # Find TIFs recursively into an array — safe for any filename, handles nested PSScene dirs
-    mapfile -t TIFS < <(find "$SCENES_DIR" \( -name "*.tif" -o -name "*.tiff" \) | sort)
-    if [ ${#TIFS[@]} -eq 0 ]; then
-      echo "ERROR: No TIF files found under $SCENES_DIR"
-      exit 1
-    fi
-
-    # Mosaic all scenes + clip to AOI in one streaming pass
-    gdalwarp -cutline "$AOI" -crop_to_cutline \
-             -dstnodata "0 0 0" \
-             "${TIFS[@]}" "$ORDER_DIR/clipped.tif"
-
-    # 2. Send status before converting (via curl):
+    # Send status before clipping (via curl):
     curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
       -d "chat_id=CHAT_ID" \
       -d "text=🖼️ Converting to PNG..."
 
-    # 3. Convert to PNG with order-specific name
-    gdal_translate -of PNG -scale $ORDER_DIR/clipped.tif \
-                   /home/openclaw/planet_orders/output/[ORDER_NAME].png
+    # Mosaic + clip to AOI + convert to PNG via Python helper.
+    # Handles: path drift (searches both ~/planet_orders/output/NAME and ~/planet_orders/NAME),
+    # zip extraction, recursive TIF find (PSScene/SCENE_ID/ nesting), gdalwarp + gdal_translate.
+    PNG_PATH=$(python3 /home/openclaw/planet_orders/clip_order.py \
+      "[ORDER_NAME]" \
+      /home/openclaw/planet_orders/aoi/aoi.geojson)
+    [ $? -ne 0 ] && { echo "ERROR: clip_order.py failed — check stderr above"; exit 1; }
 
 **Why this approach:**
-- Single `gdalwarp` call handles multiple input scenes + clip in one streaming pass
-- No intermediate `mosaic.tif` — keeps RAM usage low (safe on 4GB / no-swap server)
+- `clip_order.py` searches `~/planet_orders/output/NAME/` and `~/planet_orders/NAME/` — handles agent path drift
+- Finds TIFs with `rglob` — handles Planet's `PSScene/SCENE_ID/` nested extraction layout
+- Single `gdalwarp` call: multiple input scenes + clip in one streaming pass (low RAM)
 - No `-dstalpha` — no alpha channel, no black transparent areas at edges
 - `-dstnodata "0 0 0"` fills any uncovered edge pixels with black
 - Full scenes preserved in `scenes/` for future re-clipping without re-ordering
@@ -428,13 +422,10 @@ Then go fully idle.
 
 User sends "Crop last image to [coords]" or attaches a sub-AOI. Use the stored full scenes in `~/planet_orders/[ORDER_NAME]/scenes/` — no need to re-order:
 
-    # Re-clip stored scenes to new sub-AOI (streaming, no intermediate file):
-    mapfile -t CROP_TIFS < <(find ~/planet_orders/[ORDER_NAME]/scenes \( -name "*.tif" -o -name "*.tiff" \) | sort)
-    gdalwarp -cutline sub.geojson -crop_to_cutline \
-             -dstnodata "0 0 0" \
-             "${CROP_TIFS[@]}" /tmp/clipped_temp.tif
-    gdal_translate -of PNG -scale /tmp/clipped_temp.tif \
-                   /home/openclaw/planet_orders/output/[ORDER_NAME]_crop.png
+    # Re-clip stored scenes to new sub-AOI via Python helper:
+    python3 /home/openclaw/planet_orders/clip_order.py \
+      "[ORDER_NAME]" \
+      /path/to/sub-aoi.geojson
 
     # Bounding box crop:
     gdal_translate -projwin <ulx> <uly> <lrx> <lry> -of PNG -scale input.tif cropped.png
