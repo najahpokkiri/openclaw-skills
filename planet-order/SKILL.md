@@ -224,14 +224,24 @@ After downloading, clip the GeoTIFF tightly to the facility polygon before conve
 
 ---
 
-## Step 9 — Send PNG via Telegram
+## Step 9 — Upload and Send via Telegram
 
-**IMPORTANT: OpenClaw only allows sending local files from the workspace directory.**
-Always copy the final PNG there before sending:
+**Always do BOTH: upload to catbox.moe for a permanent download link, AND send the file directly in Telegram.**
+
+### 9a — Upload to catbox.moe (high-quality permanent link)
+
+    CATBOX_URL=$(curl -4 -s -F "fileToUpload=@output.png" -F "reqtype=fileupload" https://catbox.moe/user/api.php)
+    echo "Upload URL: $CATBOX_URL"
+
+catbox.moe returns a direct URL like `https://files.catbox.moe/xxxxxx.png`. If upload fails, proceed to 9b without a link.
+
+### 9b — Copy to workspace and send file via Telegram
+
+OpenClaw only allows sending local files from the workspace directory:
 
     cp output.png /home/openclaw/.openclaw/workspace/output.png
 
-Then send using the openclaw message tool with the workspace path, or via curl:
+Then send the file:
 
     curl -s \
       -F "chat_id=CHAT_ID" \
@@ -239,13 +249,41 @@ Then send using the openclaw message tool with the workspace path, or via curl:
       -F "caption=ORDER_NAME | DATE | N scenes | CLOUD% cloud | WxH px" \
       "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument"
 
-If PNG > 50MB: compress first, then re-copy:
+### 9c — Send the download link as a message
+
+    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+      -d "chat_id=CHAT_ID" \
+      -d "text=Download (full quality): $CATBOX_URL"
+
+If PNG > 50MB: compress first then re-copy:
 
     convert -resize 50% output.png output.png && cp output.png /home/openclaw/.openclaw/workspace/output.png
 
 ---
 
-## Step 10 — Confirm and Go Idle
+## Step 10 — Log the Order
+
+Append to `/home/openclaw/planet_orders/orders.json` after every successful delivery:
+
+    python3 -c "
+    import json, os
+    log = '/home/openclaw/planet_orders/orders.json'
+    entries = json.load(open(log)) if os.path.exists(log) else []
+    entries.append({
+        'date': 'IMAGERY_DATE',
+        'ordered_at': 'TIMESTAMP',
+        'name': 'ORDER_NAME',
+        'location': 'LOCATION_NAME',
+        'file': 'output.png',
+        'size_mb': FILESIZE_MB,
+        'catbox_url': 'CATBOX_URL',
+        'sent': True
+    })
+    json.dump(entries, open(log, 'w'), indent=2)
+    "
+
+
+## Step 11 — Confirm and Go Idle
 
 Send summary: order name, date, scene cloud %, facility cloud %, scenes, file size, dimensions.
 Then go fully idle.
