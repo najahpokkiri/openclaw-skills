@@ -6,7 +6,7 @@ metadata: {"openclaw":{"requires":{"bins":["gdal_translate","gdalwarp","ogr2ogr"
 
 # Planet Satellite Imagery Order Skill
 
-Receives AOI from Telegram → uploads to Planet Explorer → selects right scenes → orders → polls until ready → downloads → converts to PNG → sends via Telegram.
+Receives AOI from Telegram → uploads to Planet Explorer → selects right scenes → **visually checks cloud cover over AOI** → orders → polls until ready → downloads → converts to PNG → sends via Telegram.
 
 Credentials in env: PL_EMAIL, PL_PASSWORD, TELEGRAM_BOT_TOKEN.
 
@@ -14,12 +14,13 @@ Credentials in env: PL_EMAIL, PL_PASSWORD, TELEGRAM_BOT_TOKEN.
 
 ## Output Rules
 
-- Do NOT send screenshots, status updates, or progress messages to Telegram while working
-- Work silently. The user sees nothing until PNG is ready.
-- Only 2 messages total:
-  1. Pre-order notice: "Found N scenes for [location] on [date], X% cloud. Ordering..."
-  2. Final: send the PNG file with caption
-- Exception: if waiting >10 min, send ONE "Still processing, Planet order in queue..." message
+- Work silently while doing setup and scene search
+- **Allowed messages:**
+  1. Pre-order notice (before placing order): scene cloud % + estimated AOI cloud %, date, scene count
+  2. Every 5 minutes during polling: one brief status update (see Step 7)
+  3. Final: send the PNG file with caption
+- If no clear date found: message user with best AOI cloud estimate and ask to confirm before ordering
+- Do NOT send screenshots to the user
 
 ---
 
@@ -58,7 +59,8 @@ Small, precise AOI = fewer scenes = lower cost. Planet clips delivered imagery t
     # Returns: { "result": { "file_path": "documents/file_123.geojson" } }
 
     # Download file
-    curl -s -o /home/openclaw/planet_orders/aoi/incoming.geojson       "https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/documents/file_123.geojson"
+    curl -s -o /home/openclaw/planet_orders/aoi/incoming.geojson \
+      "https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/documents/file_123.geojson"
 
 Convert if needed:
     ogr2ogr -f GeoJSON aoi.geojson input.kml    # KML
@@ -95,20 +97,49 @@ Convert if needed:
 
 ---
 
-## Step 5 — Select Scenes (COST CONTROL)
+## Step 5 — Select Scenes (COST CONTROL + AOI CLOUD CHECK)
 
-**Goal: fewest scenes from best single day covering >= 90% of AOI.**
+**Goal: fewest scenes from best single day covering >= 90% of AOI, with clear sky over the AOI itself.**
 
+### 5a — Group and rank candidate dates
 1. Only scenes that actually intersect AOI geometry
 2. Group by date; find minimum scenes for >= 90% coverage
-3. Rank: coverage % desc → cloud cover asc → recency
-4. Notify user before ordering:
+3. Rank: coverage % desc → scene cloud % asc → recency
 
-       Found coverage for [location]
-       Best date: [YYYY-MM-DD]
-       Scenes to order: [N] (covers [X]% of AOI)
-       Avg cloud cover: [Y]%
-       Ordering now...
+### 5b — Visual AOI cloud check (MANDATORY for each candidate date)
+
+Planet's scene-level cloud % covers the whole tile, not just your AOI. You MUST visually verify.
+
+For each top candidate date (up to 3):
+1. Click the scene in Planet Explorer to select/preview it
+2. Zoom the map to the AOI bounding box so the AOI fills the viewport
+3. Take a browser screenshot of the map at this zoom level
+4. Visually estimate what percentage of the **AOI area** is obscured by cloud or cloud shadow
+5. Record: date, scene cloud %, estimated AOI cloud %
+
+**Decision rule:**
+- AOI cloud estimate < 30%: ✅ proceed with this date
+- AOI cloud estimate 30–70%: ⚠️ borderline — prefer a clearer date if available
+- AOI cloud estimate > 70%: ❌ skip this date, try next candidate
+
+**If all candidates have AOI cloud > 70%:**
+- Pick the date with the lowest AOI cloud estimate
+- Message the user:
+  ```
+  ⚠️ Best available date: [YYYY-MM-DD]
+  Scene cloud: [X]% | Estimated AOI cloud: [Y]%
+  No fully clear date found in range. Proceed anyway? (reply yes/no)
+  ```
+- Wait for user confirmation before ordering
+
+### 5c — Pre-order notification (once clear date found)
+
+    Found coverage for [location]
+    Best date: [YYYY-MM-DD]
+    Scenes to order: [N] (covers [X]% of AOI)
+    Scene cloud cover: [Y]%
+    Estimated AOI cloud cover: [Z]%
+    Ordering now...
 
 ---
 
@@ -120,6 +151,7 @@ Convert if needed:
 - **Enable: Clip to AOI**
 - Submit order
 - Note the order ID and order URL from the confirmation
+- Record the order start time (for elapsed time tracking in Step 7)
 
 ---
 
@@ -128,7 +160,14 @@ Convert if needed:
 After ordering, Planet redirects to the order detail page:
   https://insights.planet.com/data/orders/[ORDER-ID]
 
-**Poll this page every 30 seconds:**
+**Poll this page every 30 seconds. Every 5 minutes, send ONE status message to Telegram:**
+
+    Order processing... [X] min elapsed. Planet usually takes 15–30 min.
+
+Replace [X] with actual minutes elapsed since order was placed (round to nearest 5).
+Send at: 5 min, 10 min, 15 min, 20 min, etc. — until order completes.
+
+**Poll steps:**
 1. Take a browser snapshot of https://insights.planet.com/data/orders/[ORDER-ID]
 2. Look for status indicators: "success", "complete", "ready", "Download", green checkmark
 3. Also check https://www.planet.com/account/#/orders for the order list status
@@ -166,7 +205,11 @@ If clicking download does not work, extract cookies and use curl:
 
 ## Step 9 — Send PNG via Telegram
 
-    curl -s       -F "chat_id=CHAT_ID"       -F "document=@output.png"       -F "caption=ORDER_NAME | DATE | N scenes | CLOUD% cloud | WxH px"       "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument"
+    curl -s \
+      -F "chat_id=CHAT_ID" \
+      -F "document=@output.png" \
+      -F "caption=ORDER_NAME | DATE | N scenes | CLOUD% cloud | WxH px" \
+      "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument"
 
 If PNG > 50MB: `convert -resize 50% output.png output.png`
 
@@ -174,7 +217,7 @@ If PNG > 50MB: `convert -resize 50% output.png output.png`
 
 ## Step 10 — Confirm and Go Idle
 
-Send summary: order name, date, cloud cover, scenes, file size, dimensions.
+Send summary: order name, date, scene cloud %, AOI cloud %, scenes, file size, dimensions.
 Then go fully idle.
 
 ---
