@@ -20,12 +20,9 @@ Credentials in env: `PL_EMAIL`, `PL_PASSWORD`, `TELEGRAM_BOT_TOKEN`.
 4. **ONE SESSION AT A TIME.** Check session lock at Step 0. Do not process two AOIs in one run.
 5. **ALL Telegram messages via `curl`.** Never use a native OpenClaw message tool.
 6. **ONE short message per stage.** No walls of text.
-7. **SCREENSHOT BEFORE EVERY ORDER — NO EXCEPTIONS.**
-   Before Step 6, you MUST:
-   (a) zoom browser to AOI bounding box
-   (b) `openclaw browser screenshot /tmp/cloud-check.png`
-   (c) send via `sendPhoto` (curl) with pre-order caption
-   If screenshot or send fails → send error to Telegram, STOP. No order without screenshot.
+7. **BROWSER SCREENSHOTS ARE INTERNAL ONLY — NEVER SEND THEM TO TELEGRAM.**
+   `openclaw browser screenshot` is a navigation tool. Screenshots are for YOUR eyes only.
+   NEVER run a curl sendPhoto command for a browser screenshot. Not at Step 3, not at Step 5, not anywhere.
 8. **ALWAYS START FRESH — NEVER ASK ABOUT PREVIOUS ORDERS.**
    When a GeoJSON + date range is received, begin the workflow immediately.
    Do NOT check `orders.json`. Do NOT ask "resend or new order?". Previous orders are irrelevant.
@@ -221,32 +218,27 @@ For the top 1–2 candidate dates in the Daily Results panel:
    - Cloud % < 40% → ✅ proceed with this date
    - Cloud % 40–70% → ⚠️ try next candidate; if none better, proceed with lowest
    - Cloud % > 70% → ❌ skip, try next candidate date
-5. Take screenshot of the left panel (showing scene list with thumbnails and cloud %):
-   `openclaw browser screenshot /tmp/cloud-check.png`
+5. Take a screenshot to inspect: `openclaw browser screenshot /tmp/cloud-check.png` (internal only — do NOT send)
 6. If best available date has cloud > 70%:
-   - Send screenshot with warning via `sendPhoto`:
+   - Send a TEXT warning (not a photo):
      ```bash
-     curl -s \
-       -F "chat_id=CHAT_ID" \
-       -F "photo=@/tmp/cloud-check.png" \
-       -F "caption=⚠️ Best available: [DATE] | [X]% cloud | No clear date found. Proceed? (reply yes/no)" \
-       "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto"
+     curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+       -d "chat_id=CHAT_ID" \
+       -d "text=⚠️ Best available: [DATE] | [X]% cloud | No clear date found. Proceed? (reply yes/no)"
      ```
    - Wait for user reply before proceeding to Step 6
 
-### 5c — Pre-order notice (send screenshot of scene panel, then order immediately)
+### 5c — Pre-order notice (text message only, then order immediately)
 
-The screenshot from Step 5b (left panel showing scenes, thumbnails, cloud %) is already saved at `/tmp/cloud-check.png`. Send it once, then go straight to Step 6 — no waiting, no asking:
+Send a single text message, then go straight to Step 6 — no waiting, no asking, no photos:
 
 ```bash
-curl -s \
-  -F "chat_id=CHAT_ID" \
-  -F "photo=@/tmp/cloud-check.png" \
-  -F "caption=✅ [location] | [DATE] | [N] scenes | [X]% cloud | Ordering now..." \
-  "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto"
+curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+  -d "chat_id=CHAT_ID" \
+  -d "text=✅ [location] | [DATE] | [N] scenes | [X]% cloud | Ordering now..."
 ```
 
-Immediately proceed to Step 6. Do not wait for a reply. Do not take another screenshot.
+Immediately proceed to Step 6. Do not wait for a reply. Do not send any photos.
 
 ---
 
