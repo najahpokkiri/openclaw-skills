@@ -209,42 +209,44 @@ Confirm `"file"` matches current AOI. If not → STOP, send mismatch error.
 3. Rank: coverage % desc → scene cloud % asc → most recent
 4. Pick the top date
 
-### 5b — Visual cloud check over AOI (MANDATORY for each candidate date)
+### 5b — Cloud check (read from UI — do NOT use the map viewport)
 
-For the top 1–2 candidate dates, while still in Planet Explorer:
-1. Click the scene to select/highlight it on the map
-2. Zoom the map so the AOI polygon fills the viewport
-3. Take a screenshot: `openclaw browser screenshot /tmp/cloud-check.png`
-4. Inspect ONLY the area inside the AOI polygon:
-   - Estimate % of AOI covered by cloud or cloud shadow
-   - Ignore clouds over land outside the AOI boundary
-5. Decision:
-   - AOI cloud < 40% → ✅ proceed with this date
-   - AOI cloud 40–70% → ⚠️ try next candidate; if none better, ask user
-   - AOI cloud > 70% → ❌ skip, try next candidate date
-6. If all candidate dates have AOI cloud ≥ 40%:
-   - Pick lowest AOI cloud date
+**Important:** The map viewport on the right side does NOT render in headless Chrome. Ignore it entirely. All cloud data is in the left panel.
+
+For the top 1–2 candidate dates in the Daily Results panel:
+1. Read the cloud % shown directly in the scene row (e.g. "28.66%", "100%")
+2. Click the scene row to select it — a thumbnail preview appears in the left panel
+3. Use the scene thumbnail (left panel) and the reported cloud % for your decision
+4. Decision:
+   - Cloud % < 40% → ✅ proceed with this date
+   - Cloud % 40–70% → ⚠️ try next candidate; if none better, proceed with lowest
+   - Cloud % > 70% → ❌ skip, try next candidate date
+5. Take screenshot of the left panel (showing scene list with thumbnails and cloud %):
+   `openclaw browser screenshot /tmp/cloud-check.png`
+6. If best available date has cloud > 70%:
    - Send screenshot with warning via `sendPhoto`:
      ```bash
      curl -s \
        -F "chat_id=CHAT_ID" \
        -F "photo=@/tmp/cloud-check.png" \
-       -F "caption=⚠️ Best available: [DATE] | ~[X]% cloud over AOI | Proceed? (reply yes/no)" \
+       -F "caption=⚠️ Best available: [DATE] | [X]% cloud | No clear date found. Proceed? (reply yes/no)" \
        "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto"
      ```
    - Wait for user reply before proceeding to Step 6
 
-### 5c — Pre-order notice (include screenshot)
+### 5c — Pre-order notice (send screenshot of scene panel, then order immediately)
 
-Send the cloud-check screenshot so the user can visually confirm before the order is placed:
+The screenshot from Step 5b (left panel showing scenes, thumbnails, cloud %) is already saved at `/tmp/cloud-check.png`. Send it once, then go straight to Step 6 — no waiting, no asking:
 
 ```bash
 curl -s \
   -F "chat_id=CHAT_ID" \
   -F "photo=@/tmp/cloud-check.png" \
-  -F "caption=✅ [location] | [DATE] | [N] scenes | ~[X]% cloud over AOI | Ordering now..." \
+  -F "caption=✅ [location] | [DATE] | [N] scenes | [X]% cloud | Ordering now..." \
   "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto"
 ```
+
+Immediately proceed to Step 6. Do not wait for a reply. Do not take another screenshot.
 
 ---
 
