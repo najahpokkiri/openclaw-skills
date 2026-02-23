@@ -86,13 +86,22 @@ try:
     else:
         age = (datetime.datetime.utcnow() - datetime.datetime.fromisoformat(d['started'].replace('Z',''))).total_seconds()/3600
         print('LOCK:active file=' + d['file'] + ' age_hrs=' + str(round(age,2)))
-except:
-    print('LOCK:none')
+except json.JSONDecodeError:
+    print('LOCK:corrupt')
+except Exception:
+    print('LOCK:corrupt')
 "
 ```
 
 - `LOCK:none` → proceed to Step 1
-- `LOCK:done` → STOP. Send: `"⏹ Previous order [order] complete. Send a new AOI file to start a new order."` Then go idle.
+- `LOCK:done` → STOP. Clean up and go idle:
+  ```bash
+  rm -f /tmp/pre-order-ss.sent
+  curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    -d "chat_id=CHAT_ID" \
+    -d "text=⏹ Previous order [order] complete. Send a new AOI file to start a new order."
+  ```
+- `LOCK:corrupt` → treat as `LOCK:active`. STOP. Send: `"⚠️ Session file is corrupt. Delete current-session.json to reset."` Do not proceed.
 - `LOCK:active age_hrs < 2` → STOP. Send: `"⚠️ Session already active for [file]. Delete current-session.json to reset."`
 - `LOCK:active age_hrs >= 2` → stale. Send: `"⚠️ Clearing expired lock for [file]."` Proceed to Step 1.
 
@@ -390,14 +399,24 @@ CATBOX_URL=$(curl -4 -s \
 cp /home/openclaw/planet_orders/output/${ORDER_NAME}.png \
    /home/openclaw/.openclaw/workspace/${ORDER_NAME}.png
 
-curl -s \
-  -F "chat_id=CHAT_ID" \
-  -F "photo=@/home/openclaw/.openclaw/workspace/${ORDER_NAME}.png" \
-  -F "caption=${ORDER_NAME} | [DATE] | [N] scenes | [CLOUD]% cloud | [W]x[H] px" \
-  "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto"
-```
+PNG_SIZE=$(stat -c %s "/home/openclaw/.openclaw/workspace/${ORDER_NAME}.png" 2>/dev/null || echo 0)
 
-If the file is > 10 MB, Telegram will reject it. In that case fall back to `sendDocument` and note it in the caption.
+if [ "$PNG_SIZE" -le 10485760 ]; then
+  # Under 10 MB — send as inline photo
+  curl -s \
+    -F "chat_id=CHAT_ID" \
+    -F "photo=@/home/openclaw/.openclaw/workspace/${ORDER_NAME}.png" \
+    -F "caption=${ORDER_NAME} | [DATE] | [N] scenes | [CLOUD]% cloud | [W]x[H] px" \
+    "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto"
+else
+  # Over 10 MB — send as document (tap to view)
+  curl -s \
+    -F "chat_id=CHAT_ID" \
+    -F "document=@/home/openclaw/.openclaw/workspace/${ORDER_NAME}.png" \
+    -F "caption=${ORDER_NAME} | [DATE] | [N] scenes | [CLOUD]% cloud | [W]x[H] px" \
+    "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument"
+fi
+```
 
 Caption format: `ORDER_NAME | DATE | N scenes | X% cloud | WxH px`
 Do NOT say "clipped to AOI" in the caption.
@@ -424,7 +443,11 @@ convert -resize 50% /home/openclaw/planet_orders/output/${ORDER_NAME}.png \
 python3 -c "
 import json, os
 log = '/home/openclaw/planet_orders/orders.json'
-entries = json.load(open(log)) if os.path.exists(log) else []
+tmp = log + '.tmp'
+try:
+    entries = json.load(open(log)) if os.path.exists(log) else []
+except (json.JSONDecodeError, IOError):
+    entries = []
 entries.append({
     'date': 'IMAGERY_DATE',
     'ordered_at': 'TIMESTAMP',
@@ -436,7 +459,8 @@ entries.append({
     'catbox_url': 'CATBOX_URL',
     'sent': True
 })
-json.dump(entries, open(log, 'w'), indent=2)
+json.dump(entries, open(tmp, 'w'), indent=2)
+os.replace(tmp, log)
 "
 
 printf '{"done":true,"order":"%s","completed_at":"%s"}\n' \
