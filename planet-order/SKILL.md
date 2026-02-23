@@ -69,15 +69,32 @@ The AOI file may include surrounding land, trees, or buffer zones the user does 
 
 Before doing anything else, check whether a session is already active:
 
+Run this shell command to get an unambiguous lock status:
+
 ```bash
-cat /home/openclaw/.openclaw/workspace/current-session.json 2>/dev/null || echo 'null'
+python3 -c "
+import json, sys, os, datetime
+f = '/home/openclaw/.openclaw/workspace/current-session.json'
+if not os.path.exists(f):
+    print('LOCK:none')
+    sys.exit(0)
+try:
+    d = json.load(open(f))
+    if not isinstance(d, dict) or not d.get('file'):
+        print('LOCK:none')
+    else:
+        started = d.get('started', '')
+        age_hrs = (datetime.datetime.utcnow() - datetime.datetime.fromisoformat(started.replace('Z',''))).total_seconds() / 3600 if started else 999
+        print('LOCK:active file=' + d['file'] + ' age_hrs=' + str(round(age_hrs, 2)))
+except Exception as e:
+    print('LOCK:none error=' + str(e))
+"
 ```
 
-Parse the output:
-- If the result is `null` or `{}` or the file is missing → proceed to Step 1.
-- If the result contains a non-empty `"file"` field:
-  - Check the `"started"` timestamp. If it is less than 2 hours ago → **STOP**. Send a Telegram message: "⚠️ A session is already active for [file]. Aborting to avoid duplicate order. If this is stale, delete `current-session.json` and retry." Then exit.
-  - If the `"started"` timestamp is 2 or more hours ago → the lock is stale. Log to Telegram: "⚠️ Clearing expired session lock for [file]." Proceed to Step 1.
+Act on the output:
+- `LOCK:none` → proceed to Step 1.
+- `LOCK:active … age_hrs=X` where X < 2 → **STOP**. Send Telegram: "⚠️ A session is already active for [file]. Aborting to avoid duplicate order. If this is stale, delete `current-session.json` and retry." Then exit.
+- `LOCK:active … age_hrs=X` where X >= 2 → stale lock. Send Telegram: "⚠️ Clearing expired session lock for [file]." Proceed to Step 1.
 
 ---
 
@@ -107,7 +124,8 @@ Replace `<FILENAME_FROM_TELEGRAM>` with the exact filename attached to the most 
 Convert if needed:
     ogr2ogr -f GeoJSON aoi.geojson input.kml    # KML
     ogr2ogr -f GeoJSON aoi.geojson input.shp    # Shapefile
-    # GeoJSON: use directly
+    cp /home/openclaw/planet_orders/aoi/incoming.geojson \
+      /home/openclaw/planet_orders/aoi/aoi.geojson    # GeoJSON: copy to canonical name
 
 **After AOI is saved, send (via curl):**
     curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
@@ -285,20 +303,20 @@ Full scenes are stored locally. Mosaic all scenes first (fills any gaps between 
     SCENES_DIR=$ORDER_DIR/scenes
     AOI=/home/openclaw/planet_orders/aoi/aoi.geojson
 
-    # If downloaded as zip (Planet delivers as output.zip), extract first:
-    unzip $ORDER_DIR/output.zip -d $SCENES_DIR/
+    # Extract zip if present (Planet delivers as output.zip; -o overwrites without prompting)
+    [ -f "$ORDER_DIR/output.zip" ] && unzip -o "$ORDER_DIR/output.zip" -d "$SCENES_DIR/"
 
-    # Find TIFs recursively — Planet extracts into nested subdirectories
-    TIFS=$(find $SCENES_DIR -name "*.tif" -o -name "*.tiff" | sort | tr '\n' ' ')
-    if [ -z "$TIFS" ]; then
+    # Find TIFs recursively into an array — safe for any filename, handles nested PSScene dirs
+    mapfile -t TIFS < <(find "$SCENES_DIR" \( -name "*.tif" -o -name "*.tiff" \) | sort)
+    if [ ${#TIFS[@]} -eq 0 ]; then
       echo "ERROR: No TIF files found under $SCENES_DIR"
       exit 1
     fi
 
     # Mosaic all scenes + clip to AOI in one streaming pass
-    gdalwarp -cutline $AOI -crop_to_cutline \
+    gdalwarp -cutline "$AOI" -crop_to_cutline \
              -dstnodata "0 0 0" \
-             $TIFS $ORDER_DIR/clipped.tif
+             "${TIFS[@]}" "$ORDER_DIR/clipped.tif"
 
     # 2. Send status before converting (via curl):
     curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
@@ -411,9 +429,10 @@ Then go fully idle.
 User sends "Crop last image to [coords]" or attaches a sub-AOI. Use the stored full scenes in `~/planet_orders/[ORDER_NAME]/scenes/` — no need to re-order:
 
     # Re-clip stored scenes to new sub-AOI (streaming, no intermediate file):
+    mapfile -t CROP_TIFS < <(find ~/planet_orders/[ORDER_NAME]/scenes \( -name "*.tif" -o -name "*.tiff" \) | sort)
     gdalwarp -cutline sub.geojson -crop_to_cutline \
              -dstnodata "0 0 0" \
-             ~/planet_orders/[ORDER_NAME]/scenes/*.tif /tmp/clipped_temp.tif
+             "${CROP_TIFS[@]}" /tmp/clipped_temp.tif
     gdal_translate -of PNG -scale /tmp/clipped_temp.tif \
                    /home/openclaw/planet_orders/output/[ORDER_NAME]_crop.png
 
