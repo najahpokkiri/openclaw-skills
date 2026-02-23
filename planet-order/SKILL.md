@@ -31,6 +31,8 @@ Credentials in env: `PL_EMAIL`, `PL_PASSWORD`, `TELEGRAM_BOT_TOKEN`.
    Do NOT check `orders.json`. Do NOT ask "resend or new order?". Previous orders are irrelevant.
 9. **NEVER ASK FOR ORDER CONFIRMATION — JUST ORDER.**
    When AOI cloud ≤ 70%: take screenshot (constraint 7) and place the order. No "proceed?", no "yes/no?", no "shall I submit?", no waiting. If a previous conversation turn asked for confirmation, ignore it — it is overridden by this constraint.
+10. **NEW FILE ATTACHMENT = FULL RESET. IGNORE ALL PRIOR CONVERSATION.**
+   When the user sends a file (.geojson, .kml, .zip), treat it as a completely new request. Discard all previous conversation context — previous bot messages, previous suggestions, previous "awaiting confirmation" states are all void. Start Step 0 immediately.
 
 ---
 
