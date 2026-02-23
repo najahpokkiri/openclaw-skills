@@ -1,7 +1,7 @@
 ---
 name: planet-order
 description: "Order satellite imagery from Planet Explorer via browser automation. User sends AOI file (GeoJSON/KML/Shapefile) + date range via Telegram. Skill downloads AOI, uploads it to Planet Explorer, selects minimum scenes covering the AOI, orders full scene delivery, and sends PNG via Telegram. Trigger: user sends a file attachment with dates, or mentions a saved location + date range."
-metadata: {"openclaw":{"requires":{"bins":["gdal_translate","gdalwarp","gdal_merge.py","ogr2ogr","curl"]},"emoji":"🛰️"}}
+metadata: {"openclaw":{"requires":{"bins":["gdal_translate","gdalwarp","ogr2ogr","curl"]},"emoji":"🛰️"}}
 ---
 
 # Planet Satellite Imagery Order Skill
@@ -14,12 +14,22 @@ Credentials in env: PL_EMAIL, PL_PASSWORD, TELEGRAM_BOT_TOKEN.
 
 ## Output Rules
 
-- Work silently while doing setup and scene search
-- **Allowed messages:**
-  1. Pre-order notice (before placing order): scene cloud % + estimated facility cloud %, date, scene count
-  2. Every 5 minutes during polling: one brief status update (see Step 7)
-  3. Final: send the PNG file with caption
-- If no clear date found: message user with best facility cloud estimate and ask to confirm before ordering
+**Send one short message at each stage — one line only, no walls of text.**
+
+| Stage | Message |
+|-------|---------|
+| AOI received | `📥 Got your AOI. Uploading to Planet Explorer...` |
+| Search running | `🔍 Searching [date range]...` |
+| Clear date found | Pre-order notice (date, scenes, cloud %) — see Step 5c |
+| Order submitted | `🛒 Order placed ([N] scenes). Waiting for Planet to process...` |
+| Every 5 min polling | `⏳ Order processing... [X] min elapsed. Planet usually takes 15–30 min.` |
+| Download complete | `✂️ Download complete. Mosaicking and clipping...` |
+| Converting | `🖼️ Converting to PNG...` |
+| Done | Send the PNG file with caption |
+
+- One line per message — no multi-line status walls
+- If an error occurs at any stage: one-line error message, then stop
+- If no clear date found: ask user to confirm before ordering (see Step 5b)
 - Do NOT send screenshots to the user
 
 ---
@@ -67,6 +77,11 @@ Convert if needed:
     ogr2ogr -f GeoJSON aoi.geojson input.shp    # Shapefile
     # GeoJSON: use directly
 
+**After AOI is saved, send:**
+    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+      -d "chat_id=CHAT_ID" \
+      -d "text=📥 Got your AOI. Uploading to Planet Explorer..."
+
 ---
 
 ## Step 2 — Login to Planet Explorer
@@ -85,6 +100,11 @@ Convert if needed:
    `openclaw browser upload /home/openclaw/planet_orders/aoi/aoi.geojson`
 3. Wait for AOI polygon to appear on map
 4. Fallback: draw bounding box manually using the rectangle draw tool
+
+**After AOI polygon is confirmed on map, send:**
+    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+      -d "chat_id=CHAT_ID" \
+      -d "text=🔍 Searching [DATE_FROM] – [DATE_TO]..."
 
 ---
 
@@ -159,6 +179,11 @@ Planet charges per clip operation — clipping on Planet's side wastes money. Or
 - Note the order ID and order URL from the confirmation
 - Record the order start time (for elapsed time tracking in Step 7)
 
+**After order is submitted, send:**
+    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+      -d "chat_id=CHAT_ID" \
+      -d "text=🛒 Order placed ([N] scenes). Waiting for Planet to process..."
+
 ---
 
 ## Step 7 — Poll Until Ready and Download (DO NOT STOP UNTIL DONE)
@@ -188,6 +213,11 @@ Send at: 5 min, 10 min, 15 min, 20 min, etc. — until order completes.
         # Move/extract downloaded TIFs here
         # e.g. unzip order.zip -d ~/planet_orders/[ORDER_NAME]/scenes/
 
+**After download is complete, send:**
+    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+      -d "chat_id=CHAT_ID" \
+      -d "text=✂️ Download complete. Mosaicking and clipping..."
+
 **Alternative download via curl using browser cookies:**
 If clicking download does not work, extract cookies and use curl:
     # Get cookies via openclaw browser cookies command
@@ -207,26 +237,28 @@ Full scenes are stored locally. Mosaic all scenes first (fills any gaps between 
     SCENES_DIR=$ORDER_DIR/scenes
     AOI=/home/openclaw/planet_orders/aoi/aoi.geojson
 
-    # 1. Mosaic all full scenes (gdal_merge fills gaps between tiles — no black seams)
-    gdal_merge.py -o $ORDER_DIR/mosaic.tif $SCENES_DIR/*.tif
-
-    # 2. Clip mosaic to AOI (no -dstalpha — avoids black/transparent areas at edges)
-    gdalwarp -cutline $AOI -crop_to_cutline \
-             -dstnodata "0 0 0" \
-             $ORDER_DIR/mosaic.tif $ORDER_DIR/clipped.tif
-
-    # 3. Convert to PNG with order-specific name
-    gdal_translate -of PNG -scale $ORDER_DIR/clipped.tif \
-                   /home/openclaw/planet_orders/output/[ORDER_NAME].png
-
     # If downloaded as zip, extract to scenes dir first:
     unzip order.zip -d $SCENES_DIR/
 
+    # 1. Mosaic all scenes + clip to AOI in one streaming pass (RAM-efficient, no intermediate file)
+    gdalwarp -cutline $AOI -crop_to_cutline \
+             -dstnodata "0 0 0" \
+             $SCENES_DIR/*.tif $ORDER_DIR/clipped.tif
+
+    # 2. Convert to PNG with order-specific name
+    # Send status before converting:
+    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+      -d "chat_id=CHAT_ID" \
+      -d "text=🖼️ Converting to PNG..."
+    gdal_translate -of PNG -scale $ORDER_DIR/clipped.tif \
+                   /home/openclaw/planet_orders/output/[ORDER_NAME].png
+
 **Why this approach:**
-- `gdal_merge.py` mosaics scenes without gaps or black seams between tiles
-- No `-dstalpha` means no alpha channel is added, so edge areas are black fill (not transparent)
-- `-dstnodata "0 0 0"` fills any uncovered edge pixels with black instead of leaving them as nodata
-- Full scenes are preserved in `scenes/` for future re-clipping to any sub-AOI
+- Single `gdalwarp` call handles multiple input scenes + clip in one streaming pass
+- No intermediate `mosaic.tif` — keeps RAM usage low (safe on 4GB / no-swap server)
+- No `-dstalpha` — no alpha channel, no black transparent areas at edges
+- `-dstnodata "0 0 0"` fills any uncovered edge pixels with black
+- Full scenes preserved in `scenes/` for future re-clipping without re-ordering
 
 ---
 
@@ -306,11 +338,10 @@ Then go fully idle.
 
 User sends "Crop last image to [coords]" or attaches a sub-AOI. Use the stored full scenes in `~/planet_orders/[ORDER_NAME]/scenes/` — no need to re-order:
 
-    # Re-mosaic and clip to new sub-AOI:
-    gdal_merge.py -o /tmp/mosaic_temp.tif ~/planet_orders/[ORDER_NAME]/scenes/*.tif
+    # Re-clip stored scenes to new sub-AOI (streaming, no intermediate file):
     gdalwarp -cutline sub.geojson -crop_to_cutline \
              -dstnodata "0 0 0" \
-             /tmp/mosaic_temp.tif /tmp/clipped_temp.tif
+             ~/planet_orders/[ORDER_NAME]/scenes/*.tif /tmp/clipped_temp.tif
     gdal_translate -of PNG -scale /tmp/clipped_temp.tif \
                    /home/openclaw/planet_orders/output/[ORDER_NAME]_crop.png
 
