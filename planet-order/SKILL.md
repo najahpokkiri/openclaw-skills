@@ -16,6 +16,8 @@ Credentials in env: PL_EMAIL, PL_PASSWORD, TELEGRAM_BOT_TOKEN.
 
 **Send one short message at each stage — one line only, no walls of text.**
 
+**ALL stage messages MUST be sent via curl commands. Do NOT use any native OpenClaw tool to send them.**
+
 | Stage | Message |
 |-------|---------|
 | AOI received | `📥 Got your AOI. Uploading to Planet Explorer...` |
@@ -25,7 +27,8 @@ Credentials in env: PL_EMAIL, PL_PASSWORD, TELEGRAM_BOT_TOKEN.
 | Every 5 min polling | `⏳ Order processing... [X] min elapsed. Planet usually takes 15–30 min.` |
 | Download complete | `✂️ Download complete. Mosaicking and clipping...` |
 | Converting | `🖼️ Converting to PNG...` |
-| Done | Send the PNG file with caption |
+| Done | Send the PNG file with caption (no "clipped to AOI") |
+| After PNG sent | `Download (full quality): [CATBOX_URL]` **(MANDATORY — send as separate message)** |
 
 - One line per message — no multi-line status walls
 - If an error occurs at any stage: one-line error message, then stop
@@ -62,7 +65,36 @@ The AOI file may include surrounding land, trees, or buffer zones the user does 
 
 ---
 
+## Step 0 — Session Pre-Flight Gate
+
+Before doing anything else, check whether a session is already active:
+
+```bash
+cat /home/openclaw/.openclaw/workspace/current-session.json 2>/dev/null || echo 'null'
+```
+
+Parse the output:
+- If the result is `null` or `{}` or the file is missing → proceed to Step 1.
+- If the result contains a non-empty `"file"` field:
+  - Check the `"started"` timestamp. If it is less than 2 hours ago → **STOP**. Send a Telegram message: "⚠️ A session is already active for [file]. Aborting to avoid duplicate order. If this is stale, delete `current-session.json` and retry." Then exit.
+  - If the `"started"` timestamp is 2 or more hours ago → the lock is stale. Log to Telegram: "⚠️ Clearing expired session lock for [file]." Proceed to Step 1.
+
+---
+
 ## Step 1 — Download AOI File from Telegram
+
+**SESSION LOCK — write atomically before downloading the AOI:**
+
+```bash
+printf '{"file":"%s","started":"%s"}\n' \
+  "<FILENAME_FROM_TELEGRAM>" \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  > /home/openclaw/.openclaw/workspace/current-session.json.tmp \
+  && mv /home/openclaw/.openclaw/workspace/current-session.json.tmp \
+        /home/openclaw/.openclaw/workspace/current-session.json
+```
+
+Replace `<FILENAME_FROM_TELEGRAM>` with the exact filename attached to the most recent Telegram message.
 
     # Get file path from Telegram
     curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getFile?file_id=FILE_ID"
@@ -77,7 +109,7 @@ Convert if needed:
     ogr2ogr -f GeoJSON aoi.geojson input.shp    # Shapefile
     # GeoJSON: use directly
 
-**After AOI is saved, send:**
+**After AOI is saved, send (via curl):**
     curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
       -d "chat_id=CHAT_ID" \
       -d "text=📥 Got your AOI. Uploading to Planet Explorer..."
@@ -101,7 +133,7 @@ Convert if needed:
 3. Wait for AOI polygon to appear on map
 4. Fallback: draw bounding box manually using the rectangle draw tool
 
-**After AOI polygon is confirmed on map, send:**
+**After AOI polygon is confirmed on map, send (via curl):**
     curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
       -d "chat_id=CHAT_ID" \
       -d "text=🔍 Searching [DATE_FROM] – [DATE_TO]..."
@@ -118,6 +150,14 @@ Convert if needed:
 ---
 
 ## Step 5 — Select Scenes (COST CONTROL + FACILITY CLOUD CHECK)
+
+**SESSION CHECK — before searching scenes:**
+
+```bash
+cat /home/openclaw/.openclaw/workspace/current-session.json
+```
+
+Confirm the AOI you are about to search scenes for exactly matches the `"file"` field. If it does not match, STOP and send to Telegram: "⚠️ Session mismatch at scene search — aborting."
 
 **Goal: fewest scenes from best single day covering >= 90% of AOI, with clear sky over the target facility itself.**
 
@@ -168,6 +208,14 @@ For each top candidate date (up to 3):
 
 ## Step 6 — Place Order (Full Scenes, No Clip)
 
+**PRE-ORDER CHECK:**
+
+```bash
+cat /home/openclaw/.openclaw/workspace/current-session.json
+```
+
+Confirm the order you are about to place is for the file named in the lock. If it does not match, STOP immediately.
+
 Planet charges per clip operation — clipping on Planet's side wastes money. Order **full scenes** instead and clip locally for free. Full scene TIFs are also kept permanently for future re-cropping without re-ordering.
 
 **Order settings:**
@@ -179,7 +227,7 @@ Planet charges per clip operation — clipping on Planet's side wastes money. Or
 - Note the order ID and order URL from the confirmation
 - Record the order start time (for elapsed time tracking in Step 7)
 
-**After order is submitted, send:**
+**After order is submitted, send (via curl):**
     curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
       -d "chat_id=CHAT_ID" \
       -d "text=🛒 Order placed ([N] scenes). Waiting for Planet to process..."
@@ -191,7 +239,7 @@ Planet charges per clip operation — clipping on Planet's side wastes money. Or
 After ordering, Planet redirects to the order detail page:
   https://insights.planet.com/data/orders/[ORDER-ID]
 
-**Poll this page every 30 seconds. Every 5 minutes, send ONE status message to Telegram:**
+**Poll this page every 30 seconds. Every 5 minutes, send ONE status message to Telegram (via curl):**
 
     Order processing... [X] min elapsed. Planet usually takes 15–30 min.
 
@@ -213,7 +261,7 @@ Send at: 5 min, 10 min, 15 min, 20 min, etc. — until order completes.
         # Move/extract downloaded TIFs here
         # e.g. unzip order.zip -d ~/planet_orders/[ORDER_NAME]/scenes/
 
-**After download is complete, send:**
+**After download is complete, send (via curl):**
     curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
       -d "chat_id=CHAT_ID" \
       -d "text=✂️ Download complete. Mosaicking and clipping..."
@@ -237,19 +285,27 @@ Full scenes are stored locally. Mosaic all scenes first (fills any gaps between 
     SCENES_DIR=$ORDER_DIR/scenes
     AOI=/home/openclaw/planet_orders/aoi/aoi.geojson
 
-    # If downloaded as zip, extract to scenes dir first:
-    unzip order.zip -d $SCENES_DIR/
+    # If downloaded as zip (Planet delivers as output.zip), extract first:
+    unzip $ORDER_DIR/output.zip -d $SCENES_DIR/
 
-    # 1. Mosaic all scenes + clip to AOI in one streaming pass (RAM-efficient, no intermediate file)
+    # Find TIFs recursively — Planet extracts into nested subdirectories
+    TIFS=$(find $SCENES_DIR -name "*.tif" -o -name "*.tiff" | sort | tr '\n' ' ')
+    if [ -z "$TIFS" ]; then
+      echo "ERROR: No TIF files found under $SCENES_DIR"
+      exit 1
+    fi
+
+    # Mosaic all scenes + clip to AOI in one streaming pass
     gdalwarp -cutline $AOI -crop_to_cutline \
              -dstnodata "0 0 0" \
-             $SCENES_DIR/*.tif $ORDER_DIR/clipped.tif
+             $TIFS $ORDER_DIR/clipped.tif
 
-    # 2. Convert to PNG with order-specific name
-    # Send status before converting:
+    # 2. Send status before converting (via curl):
     curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
       -d "chat_id=CHAT_ID" \
       -d "text=🖼️ Converting to PNG..."
+
+    # 3. Convert to PNG with order-specific name
     gdal_translate -of PNG -scale $ORDER_DIR/clipped.tif \
                    /home/openclaw/planet_orders/output/[ORDER_NAME].png
 
@@ -282,7 +338,7 @@ OpenClaw only allows sending local files from the workspace directory:
     cp /home/openclaw/planet_orders/output/[ORDER_NAME].png \
        /home/openclaw/.openclaw/workspace/[ORDER_NAME].png
 
-Then send the file:
+Then send the file (via curl):
 
     curl -s \
       -F "chat_id=CHAT_ID" \
@@ -290,11 +346,17 @@ Then send the file:
       -F "caption=ORDER_NAME | DATE | N scenes | CLOUD% cloud | WxH px" \
       "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument"
 
-### 9c — Send the download link as a message
+**Caption rules:** Do NOT include the phrase "clipped to AOI". The caption format is: `[ORDER_NAME] | [DATE] | [N] scenes | [CLOUD]% cloud | [W]x[H] px`
+
+### 9c — Send the catbox download link (MANDATORY)
+
+**This step is required. Do not skip it.**
 
     curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
       -d "chat_id=CHAT_ID" \
       -d "text=Download (full quality): $CATBOX_URL"
+
+Send this as a separate message immediately after the PNG file. If catbox upload failed in 9a, skip this step only — it does not block the rest of the workflow.
 
 If PNG > 50MB: compress first then re-copy:
 
@@ -325,6 +387,16 @@ Append to `/home/openclaw/planet_orders/orders.json` after every successful deli
     })
     json.dump(entries, open(log, 'w'), indent=2)
     "
+
+
+**SESSION CLOSE — clear the lock atomically:**
+
+```bash
+printf 'null\n' \
+  > /home/openclaw/.openclaw/workspace/current-session.json.tmp \
+  && mv /home/openclaw/.openclaw/workspace/current-session.json.tmp \
+        /home/openclaw/.openclaw/workspace/current-session.json
+```
 
 
 ## Step 11 — Confirm and Go Idle
