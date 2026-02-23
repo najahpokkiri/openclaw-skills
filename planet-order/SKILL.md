@@ -27,6 +27,7 @@ Credentials in env: `PL_EMAIL`, `PL_PASSWORD`, `PL_API_KEY`, `TELEGRAM_BOT_TOKEN
 11. **ALWAYS ORDER VISUAL BUNDLE — NEVER ANALYTIC.** In Planet Explorer order dialog, select bundle labeled **"Visual"** or **"Basic RGB"** (3-band GeoTIFF). NEVER select Analytic, Analytic SR, Multispectral, UDM2, or any other bundle. If uncertain, look for the option that says "Visual" explicitly.
 12. **NEVER WRITE CUSTOM SCRIPTS.** Do not create `poll_and_process.py`, `download.py`, or any other Python/shell scripts. Use only the commands shown in this SKILL.md. Use `clip_order.py` for all local processing.
 13. **POLL AND DOWNLOAD VIA PLANET API — NOT THE BROWSER.** After placing the order, use `curl` with `PL_API_KEY` to poll and download. Do not use the browser to find a Download button.
+14. **AFTER STEP 9c (CATBOX URL SENT) — STOP. SESSION COMPLETE.** Write `done=true` to `current-session.json` (as shown in Step 10). Do not process any further messages or context from this session. If you find yourself re-reading a prior date range or AOI — STOP. The session is closed. Wait for a new file attachment.
 
 ---
 
@@ -78,7 +79,9 @@ if not os.path.exists(f):
     print('LOCK:none'); sys.exit(0)
 try:
     d = json.load(open(f))
-    if not isinstance(d, dict) or not d.get('file'):
+    if isinstance(d, dict) and d.get('done'):
+        print('LOCK:done order=' + d.get('order', '?'))
+    elif not isinstance(d, dict) or not d.get('file'):
         print('LOCK:none')
     else:
         age = (datetime.datetime.utcnow() - datetime.datetime.fromisoformat(d['started'].replace('Z',''))).total_seconds()/3600
@@ -89,6 +92,7 @@ except:
 ```
 
 - `LOCK:none` → proceed to Step 1
+- `LOCK:done` → STOP. Send: `"⏹ Previous order [order] complete. Send a new AOI file to start a new order."` Then go idle.
 - `LOCK:active age_hrs < 2` → STOP. Send: `"⚠️ Session already active for [file]. Delete current-session.json to reset."`
 - `LOCK:active age_hrs >= 2` → stale. Send: `"⚠️ Clearing expired lock for [file]."` Proceed to Step 1.
 
@@ -99,6 +103,8 @@ except:
 ### 1a — Write session lock
 
 ```bash
+rm -f /tmp/pre-order-ss.sent
+
 printf '{"file":"%s","started":"%s"}\n' \
   "FILENAME_FROM_TELEGRAM" \
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -219,16 +225,19 @@ For the top 1–2 candidate dates in the Daily Results panel:
 
 ### 5c — Pre-order screenshot (the ONE photo sent — here and only here)
 
-Take ONE screenshot of the results panel, send it, then immediately go to Step 6:
+Take ONE screenshot of the results panel, send it, then immediately go to Step 6.
+The lockfile `/tmp/pre-order-ss.sent` prevents sending this twice if re-entered:
 
 ```bash
-openclaw browser screenshot /tmp/cloud-check.png
-
-curl -s \
-  -F "chat_id=CHAT_ID" \
-  -F "photo=@/tmp/cloud-check.png" \
-  -F "caption=✅ [location] | [DATE] | [N] scenes | [X]% cloud | Ordering now..." \
-  "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto"
+if [ ! -f /tmp/pre-order-ss.sent ]; then
+  openclaw browser screenshot /tmp/cloud-check.png
+  curl -s \
+    -F "chat_id=CHAT_ID" \
+    -F "photo=@/tmp/cloud-check.png" \
+    -F "caption=✅ [location] | [DATE] | [N] scenes | [X]% cloud | Ordering now..." \
+    "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto"
+  touch /tmp/pre-order-ss.sent
+fi
 ```
 
 Do not wait for a reply. Do not take or send any more screenshots. Proceed to Step 6 immediately.
@@ -383,10 +392,12 @@ cp /home/openclaw/planet_orders/output/${ORDER_NAME}.png \
 
 curl -s \
   -F "chat_id=CHAT_ID" \
-  -F "document=@/home/openclaw/.openclaw/workspace/${ORDER_NAME}.png" \
+  -F "photo=@/home/openclaw/.openclaw/workspace/${ORDER_NAME}.png" \
   -F "caption=${ORDER_NAME} | [DATE] | [N] scenes | [CLOUD]% cloud | [W]x[H] px" \
-  "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument"
+  "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto"
 ```
+
+If the file is > 10 MB, Telegram will reject it. In that case fall back to `sendDocument` and note it in the caption.
 
 Caption format: `ORDER_NAME | DATE | N scenes | X% cloud | WxH px`
 Do NOT say "clipped to AOI" in the caption.
@@ -428,7 +439,8 @@ entries.append({
 json.dump(entries, open(log, 'w'), indent=2)
 "
 
-printf 'null\n' \
+printf '{"done":true,"order":"%s","completed_at":"%s"}\n' \
+  "$ORDER_NAME" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   > /home/openclaw/.openclaw/workspace/current-session.json.tmp \
   && mv /home/openclaw/.openclaw/workspace/current-session.json.tmp \
         /home/openclaw/.openclaw/workspace/current-session.json
@@ -436,10 +448,12 @@ printf 'null\n' \
 
 ---
 
-## Step 11 — Confirm and Go Idle
+## Step 11 — Session Complete
 
-Send one summary message: order name, date, scene cloud %, scenes, file size, dimensions.
-Then go fully idle.
+**STOP. SESSION IS DONE.**
+
+Do not send any further messages. Do not re-process any prior context. Do not restart the workflow.
+Wait silently for a new file attachment from the user.
 
 ---
 
