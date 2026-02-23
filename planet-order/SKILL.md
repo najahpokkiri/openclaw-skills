@@ -20,6 +20,15 @@ Credentials in env: `PL_EMAIL`, `PL_PASSWORD`, `TELEGRAM_BOT_TOKEN`.
 4. **ONE SESSION AT A TIME.** Check session lock at Step 0. Do not process two AOIs in one run.
 5. **ALL Telegram messages via `curl`.** Never use a native OpenClaw message tool.
 6. **ONE short message per stage.** No walls of text.
+7. **SCREENSHOT BEFORE EVERY ORDER — NO EXCEPTIONS.**
+   Before Step 6, you MUST:
+   (a) zoom browser to AOI bounding box
+   (b) `openclaw browser screenshot /tmp/cloud-check.png`
+   (c) send via `sendPhoto` (curl) with pre-order caption
+   If screenshot or send fails → send error to Telegram, STOP. No order without screenshot.
+8. **ALWAYS START FRESH — NEVER ASK ABOUT PREVIOUS ORDERS.**
+   When a GeoJSON + date range is received, begin the workflow immediately.
+   Do NOT check `orders.json`. Do NOT ask "resend or new order?". Previous orders are irrelevant.
 
 ---
 
@@ -46,7 +55,7 @@ Credentials in env: `PL_EMAIL`, `PL_PASSWORD`, `TELEGRAM_BOT_TOKEN`.
 - User says "order / get image / satellite" + location + date → order
 - User says "crop last image" → Crop Mode (bottom of this doc)
 - GeoJSON received with no date → ask for date range only, then proceed immediately
-- GeoJSON received with date range → start immediately, no questions
+- GeoJSON received with date range → start immediately, no questions, no order history lookup
 
 ---
 
