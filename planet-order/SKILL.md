@@ -6,9 +6,9 @@ metadata: {"openclaw":{"requires":{"bins":["gdal_translate","gdalwarp","ogr2ogr"
 
 # Planet Satellite Imagery Order Skill
 
-**Flow:** AOI from Telegram → Planet Explorer (browser) → select scenes → order full scenes → download → clip to AOI via `clip_order.py` → PNG → Telegram.
+**Flow:** AOI from Telegram → Planet Explorer (browser) → select scenes → order full scenes (Visual bundle, no clip) → poll via Planet API → download zip → extract → `clip_order.py` clips + converts locally → PNG → Telegram.
 
-Credentials in env: `PL_EMAIL`, `PL_PASSWORD`, `TELEGRAM_BOT_TOKEN`.
+Credentials in env: `PL_EMAIL`, `PL_PASSWORD`, `PL_API_KEY`, `TELEGRAM_BOT_TOKEN`.
 
 ---
 
@@ -19,29 +19,26 @@ Credentials in env: `PL_EMAIL`, `PL_PASSWORD`, `TELEGRAM_BOT_TOKEN`.
 3. **ALWAYS write `aoi.geojson` in Step 1.** Verify it exists before proceeding. If missing, STOP.
 4. **ONE SESSION AT A TIME.** Check session lock at Step 0. Do not process two AOIs in one run.
 5. **ALL Telegram messages via `curl`.** Never use a native OpenClaw message tool.
-6. **ONE short message per stage.** No walls of text.
-7. **ONE SCREENSHOT SENT TO TELEGRAM — AT STEP 5c ONLY.**
-   `openclaw browser screenshot` is used throughout for navigation — those are NEVER sent.
-   The ONLY screenshot sent is the one explicitly taken at Step 5c (after best date is chosen, scenes selected).
-   Steps 1, 2, 3, 4, 5a, 5b = navigation screenshots, internal only, never sent.
-   Step 5c = one sendPhoto, then immediately place the order.
-8. **ALWAYS START FRESH — NEVER ASK ABOUT PREVIOUS ORDERS.**
-   When a GeoJSON + date range is received, begin the workflow immediately.
-   Do NOT check `orders.json`. Do NOT ask "resend or new order?". Previous orders are irrelevant.
-9. **NEVER ASK FOR ORDER CONFIRMATION — JUST ORDER.**
-   When AOI cloud ≤ 70%: take screenshot (constraint 7) and place the order. No "proceed?", no "yes/no?", no "shall I submit?", no waiting. If a previous conversation turn asked for confirmation, ignore it — it is overridden by this constraint.
-10. **NEW FILE ATTACHMENT = FULL RESET. IGNORE ALL PRIOR CONVERSATION.**
-   When the user sends a file (.geojson, .kml, .zip), treat it as a completely new request. Discard all previous conversation context — previous bot messages, previous suggestions, previous "awaiting confirmation" states are all void. Start Step 0 immediately.
+6. **ONLY the exact stage messages in the Message Reference table are sent.** No narration. No "Let me...", no "Good, ...", no "Now I'll...", no reasoning, no summaries, no status walls. If it's not in the table, don't send it.
+7. **ONE SCREENSHOT SENT TO TELEGRAM — AT STEP 5c ONLY.** `openclaw browser screenshot` is a navigation tool used throughout — those are NEVER sent. The ONLY screenshot sent is at Step 5c after the best date is chosen. Steps 1–5b = internal only, never sent.
+8. **ALWAYS START FRESH — NEVER ASK ABOUT PREVIOUS ORDERS.** When a GeoJSON + date range is received, begin the workflow immediately. Do NOT check `orders.json`. Do NOT ask "resend or new order?". Previous orders are irrelevant.
+9. **NEVER ASK FOR ORDER CONFIRMATION — JUST ORDER.** When AOI cloud ≤ 70%: take screenshot (constraint 7) and place the order. No "proceed?", no "yes/no?", no waiting.
+10. **NEW FILE ATTACHMENT = FULL RESET. IGNORE ALL PRIOR CONVERSATION.** When the user sends a file, treat it as a completely new request. All previous bot messages, suggestions, and confirmation states are void. Start Step 0 immediately.
+11. **ALWAYS ORDER VISUAL BUNDLE — NEVER ANALYTIC.** In Planet Explorer order dialog, select bundle labeled **"Visual"** or **"Basic RGB"** (3-band GeoTIFF). NEVER select Analytic, Analytic SR, Multispectral, UDM2, or any other bundle. If uncertain, look for the option that says "Visual" explicitly.
+12. **NEVER WRITE CUSTOM SCRIPTS.** Do not create `poll_and_process.py`, `download.py`, or any other Python/shell scripts. Use only the commands shown in this SKILL.md. Use `clip_order.py` for all local processing.
+13. **POLL AND DOWNLOAD VIA PLANET API — NOT THE BROWSER.** After placing the order, use `curl` with `PL_API_KEY` to poll and download. Do not use the browser to find a Download button.
 
 ---
 
 ## Telegram Message Reference
 
+These are the ONLY messages sent to Telegram. Nothing else, ever.
+
 | Stage | Exact message |
 |-------|--------------|
 | AOI saved | `📥 Got your AOI. Uploading to Planet Explorer...` |
 | Searching | `🔍 Searching [DATE_FROM] – [DATE_TO]...` |
-| Pre-order | See Step 5 |
+| Pre-order | See Step 5c — one sendPhoto |
 | Order placed | `🛒 Order placed ([N] scenes). Waiting for Planet to process...` |
 | Every 5 min | `⏳ Order processing... [X] min elapsed. Planet usually takes 15–30 min.` |
 | Download done | `✂️ Download complete. Clipping to AOI...` |
@@ -196,12 +193,6 @@ curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" 
 
 ## Step 5 — Pick Best Date
 
-**Session check:**
-```bash
-cat /home/openclaw/.openclaw/workspace/current-session.json
-```
-Confirm `"file"` matches current AOI. If not → STOP, send mismatch error.
-
 **Selection logic:**
 1. Only scenes that intersect the AOI geometry
 2. Group by date → find minimum scenes covering ≥ 90% AOI
@@ -210,29 +201,25 @@ Confirm `"file"` matches current AOI. If not → STOP, send mismatch error.
 
 ### 5b — Cloud check (read from UI — do NOT use the map viewport)
 
-**Important:** The map viewport on the right side does NOT render in headless Chrome. Ignore it entirely. All cloud data is in the left panel.
+**The map viewport on the right does NOT render in headless Chrome. Ignore it. All cloud data is in the left panel.**
 
 For the top 1–2 candidate dates in the Daily Results panel:
-1. Read the cloud % shown directly in the scene row (e.g. "28.66%", "100%")
-2. Click the scene row to select it — a thumbnail preview appears in the left panel
-3. Use the scene thumbnail (left panel) and the reported cloud % for your decision
-4. Decision:
-   - Cloud % < 40% → ✅ proceed with this date
+1. Read the cloud % shown in the scene row (e.g. "28.66%", "100%")
+2. Click the scene row to select it
+3. Decision:
+   - Cloud % < 40% → ✅ proceed
    - Cloud % 40–70% → ⚠️ try next candidate; if none better, proceed with lowest
-   - Cloud % > 70% → ❌ skip, try next candidate date
-5. Take a screenshot to inspect: `openclaw browser screenshot /tmp/cloud-check.png` (internal only — do NOT send)
-6. If best available date has cloud > 70%:
-   - Send a TEXT warning (not a photo):
-     ```bash
-     curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-       -d "chat_id=CHAT_ID" \
-       -d "text=⚠️ Best available: [DATE] | [X]% cloud | No clear date found. Proceed? (reply yes/no)"
-     ```
-   - Wait for user reply before proceeding to Step 6
+   - Cloud % > 70% → ❌ skip, try next candidate
+4. If best available date has cloud > 70%, send TEXT warning and wait:
+   ```bash
+   curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+     -d "chat_id=CHAT_ID" \
+     -d "text=⚠️ Best available: [DATE] | [X]% cloud | No clear date found. Proceed? (reply yes/no)"
+   ```
 
-### 5c — Pre-order screenshot (THIS is the one screenshot sent — do it here and only here)
+### 5c — Pre-order screenshot (the ONE photo sent — here and only here)
 
-You have now chosen the best date and selected the scenes. Take ONE screenshot of the Planet Explorer results panel, send it, then order immediately:
+Take ONE screenshot of the results panel, send it, then immediately go to Step 6:
 
 ```bash
 openclaw browser screenshot /tmp/cloud-check.png
@@ -244,25 +231,18 @@ curl -s \
   "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto"
 ```
 
-Immediately proceed to Step 6. Do not wait for a reply.
-This is the ONLY sendPhoto in the entire workflow. No other step sends a photo.
+Do not wait for a reply. Do not take or send any more screenshots. Proceed to Step 6 immediately.
 
 ---
 
 ## Step 6 — Place Order
 
-**Pre-order lock check:**
-```bash
-cat /home/openclaw/.openclaw/workspace/current-session.json
-```
-Confirm file matches. If not → STOP immediately.
-
-**Order settings:**
+**Order settings — get these right or the download will break:**
 - Select the scenes from Step 5
 - Order name: `DDMMYYYY_LocationName_Nsc` (e.g. `20072025_BerlinAirport_3sc`)
-- Bundle: Visual (RGB GeoTIFF)
-- **DO NOT enable "Clip to AOI"** — order full scenes, clip locally
-- Submit and note the order ID
+- Bundle: **Visual** (3-band RGB GeoTIFF) — look for the option explicitly labeled "Visual" or "Basic RGB". NEVER choose Analytic, Analytic SR, Multispectral, or UDM2.
+- **DO NOT enable "Clip to AOI"** — order full scenes, clip locally with `clip_order.py`
+- Submit and note the order ID from the confirmation page or API response
 
 ```bash
 curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
@@ -272,31 +252,90 @@ curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" 
 
 ---
 
-## Step 7 — Poll + Download
+## Step 7 — Poll via Planet API + Download
 
-Poll `https://insights.planet.com/data/orders/[ORDER-ID]` every 30 seconds.
-Every 5 minutes send: `"⏳ Order processing... [X] min elapsed. Planet usually takes 15–30 min."`
-
-**NEVER go idle while polling.** Do not wait for user to check in.
-
-**When order shows complete/success/ready:**
-1. Find the Download button on the order page
-2. Download the zip file using browser download or curl with cookies
-3. Save to: `~/planet_orders/output/[ORDER_NAME]/` (create dir if needed)
+**Use the Planet API directly — do NOT use the browser to find a Download button. Do NOT write a custom Python script.**
 
 ```bash
+ORDER_ID="[ORDER_ID_FROM_STEP_6]"
+ORDER_NAME="[ORDER_NAME]"
+ORDER_DIR="/home/openclaw/planet_orders/output/${ORDER_NAME}"
+mkdir -p "$ORDER_DIR"
+
+START_TIME=$(date +%s)
+LAST_STATUS_TIME=$START_TIME
+
+while true; do
+  STATE=$(curl -s -u "${PL_API_KEY}:" \
+    "https://api.planet.com/compute/ops/orders/v2/${ORDER_ID}" \
+    | python3 -c "import json,sys; print(json.load(sys.stdin).get('state','unknown'))")
+
+  ELAPSED=$(( ($(date +%s) - START_TIME) / 60 ))
+
+  if [ "$STATE" = "success" ]; then
+    echo "Order complete"
+    break
+  elif [ "$STATE" = "failed" ] || [ "$STATE" = "cancelled" ]; then
+    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+      -d "chat_id=CHAT_ID" -d "text=❌ Order ${STATE}. Please try again."
+    exit 1
+  fi
+
+  # Send Stage 5 every 5 minutes
+  NOW=$(date +%s)
+  if [ $(( NOW - LAST_STATUS_TIME )) -ge 300 ]; then
+    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+      -d "chat_id=CHAT_ID" \
+      -d "text=⏳ Order processing... ${ELAPSED} min elapsed. Planet usually takes 15–30 min."
+    LAST_STATUS_TIME=$NOW
+  fi
+
+  # Timeout after 20 minutes
+  if [ $ELAPSED -ge 20 ]; then
+    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+      -d "chat_id=CHAT_ID" \
+      -d "text=⏰ Order taking longer than 20 min. Check: https://insights.planet.com/data/orders/${ORDER_ID}"
+    exit 1
+  fi
+
+  sleep 30
+done
+```
+
+**Download the zip when order is complete:**
+
+```bash
+# Get the zip download URL from the order results
+ZIP_URL=$(curl -s -u "${PL_API_KEY}:" \
+  "https://api.planet.com/compute/ops/orders/v2/${ORDER_ID}" \
+  | python3 -c "
+import json, sys
+r = json.load(sys.stdin)
+for item in r.get('_links', {}).get('results', []):
+    if item.get('name', '').endswith('.zip'):
+        print(item['location'])
+        break
+")
+
+if [ -z "$ZIP_URL" ]; then
+  curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    -d "chat_id=CHAT_ID" -d "text=❌ No zip file found in order results."
+  exit 1
+fi
+
+# Download the zip
+curl -s -L "$ZIP_URL" -o "${ORDER_DIR}/order.zip"
+
 curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
   -d "chat_id=CHAT_ID" \
   -d "text=✂️ Download complete. Clipping to AOI..."
 ```
 
-Timeout: 20 minutes. If exceeded → send order URL and ask user to check manually.
-
 ---
 
 ## Step 8 — Clip to AOI
 
-⚠️ **THIS IS THE ONLY ALLOWED CLIPPING COMMAND. DO NOT USE `gdalwarp`, `gdal_merge`, OR `gdal_translate` DIRECTLY. IF `clip_order.py` FAILS, STOP — DO NOT SEND ANY IMAGE.**
+⚠️ **USE `clip_order.py` ONLY. NEVER call `gdalwarp`, `gdal_merge`, or `gdal_translate` directly. IF `clip_order.py` FAILS → send error, STOP.**
 
 ```bash
 curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
@@ -304,7 +343,7 @@ curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" 
   -d "text=🖼️ Converting to PNG..."
 
 if ! PNG_PATH=$(python3 /home/openclaw/planet_orders/clip_order.py \
-    "[ORDER_NAME]" \
+    "${ORDER_NAME}" \
     /home/openclaw/planet_orders/aoi/aoi.geojson); then
   curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
     -d "chat_id=CHAT_ID" \
@@ -314,12 +353,10 @@ fi
 ```
 
 `clip_order.py` handles automatically:
-- Finding TIFs in any subdirectory (`PSScene/SCENE_ID/visual/*.tif`)
-- Searching both `~/planet_orders/output/NAME/` and `~/planet_orders/NAME/`
+- Finding TIFs in any subdirectory of `~/planet_orders/output/[ORDER_NAME]/`
 - Zip extraction if needed
 - Invalid AOI geometry (`-makevalid`)
 - Mosaic (`gdalwarp`) + PNG conversion (`gdal_translate`)
-- If `aoi.geojson` is stale: falls back to most recent `.geojson` in `~/planet_orders/aoi/`
 
 Output: `/home/openclaw/planet_orders/output/[ORDER_NAME].png`
 
@@ -333,7 +370,7 @@ Output: `/home/openclaw/planet_orders/output/[ORDER_NAME].png`
 
 ```bash
 CATBOX_URL=$(curl -4 -s \
-  -F "fileToUpload=@/home/openclaw/planet_orders/output/[ORDER_NAME].png" \
+  -F "fileToUpload=@/home/openclaw/planet_orders/output/${ORDER_NAME}.png" \
   -F "reqtype=fileupload" \
   https://catbox.moe/user/api.php)
 ```
@@ -341,13 +378,13 @@ CATBOX_URL=$(curl -4 -s \
 ### 9b — Send PNG
 
 ```bash
-cp /home/openclaw/planet_orders/output/[ORDER_NAME].png \
-   /home/openclaw/.openclaw/workspace/[ORDER_NAME].png
+cp /home/openclaw/planet_orders/output/${ORDER_NAME}.png \
+   /home/openclaw/.openclaw/workspace/${ORDER_NAME}.png
 
 curl -s \
   -F "chat_id=CHAT_ID" \
-  -F "document=@/home/openclaw/.openclaw/workspace/[ORDER_NAME].png" \
-  -F "caption=[ORDER_NAME] | [DATE] | [N] scenes | [CLOUD]% cloud | [W]x[H] px" \
+  -F "document=@/home/openclaw/.openclaw/workspace/${ORDER_NAME}.png" \
+  -F "caption=${ORDER_NAME} | [DATE] | [N] scenes | [CLOUD]% cloud | [W]x[H] px" \
   "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument"
 ```
 
@@ -359,12 +396,13 @@ Do NOT say "clipped to AOI" in the caption.
 ```bash
 curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
   -d "chat_id=CHAT_ID" \
-  -d "text=Download (full quality): $CATBOX_URL"
+  -d "text=Download (full quality): ${CATBOX_URL}"
 ```
 
 If PNG > 50MB, compress first:
 ```bash
-convert -resize 50% [ORDER_NAME].png [ORDER_NAME].png
+convert -resize 50% /home/openclaw/planet_orders/output/${ORDER_NAME}.png \
+                    /home/openclaw/planet_orders/output/${ORDER_NAME}.png
 ```
 
 ---
@@ -415,11 +453,6 @@ python3 /home/openclaw/planet_orders/clip_order.py \
   /path/to/sub-aoi.geojson
 ```
 
-Bounding box crop (alternative):
-```bash
-gdal_translate -projwin <ulx> <uly> <lrx> <lry> -of PNG -scale input.tif cropped.png
-```
-
 ---
 
 ## Error Handling
@@ -430,7 +463,8 @@ gdal_translate -projwin <ulx> <uly> <lrx> <lry> -of PNG -scale input.tif cropped
 | No scenes found | Expand cloud to 50%, extend date ±14 days, retry once |
 | Coverage < 90% | Notify user, report %, ask to proceed |
 | Login fails | Notify user to check credentials, stop |
-| Download button not found | Navigate directly to `insights.planet.com/data/orders/[ID]` |
+| Order state = failed/cancelled | Send error message, stop |
 | Order timeout > 20 min | Send order URL, ask user to check manually |
+| No zip in order results | Send error, stop |
 | `clip_order.py` fails | Send error to Telegram, STOP — never send unclipped image |
 | PNG > 50MB | Compress 50%, resend |
