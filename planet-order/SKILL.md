@@ -1,12 +1,12 @@
 ---
 name: planet-order
-description: "Order satellite imagery from Planet Explorer via browser automation. User sends AOI file (GeoJSON/KML/Shapefile) + date range via Telegram. Skill downloads AOI, uploads it to Planet Explorer, selects minimum scenes covering the AOI, orders clipped delivery, and sends PNG via Telegram. Trigger: user sends a file attachment with dates, or mentions a saved location + date range."
-metadata: {"openclaw":{"requires":{"bins":["gdal_translate","gdalwarp","ogr2ogr","curl"]},"emoji":"🛰️"}}
+description: "Order satellite imagery from Planet Explorer via browser automation. User sends AOI file (GeoJSON/KML/Shapefile) + date range via Telegram. Skill downloads AOI, uploads it to Planet Explorer, selects minimum scenes covering the AOI, orders full scene delivery, and sends PNG via Telegram. Trigger: user sends a file attachment with dates, or mentions a saved location + date range."
+metadata: {"openclaw":{"requires":{"bins":["gdal_translate","gdalwarp","gdal_merge.py","ogr2ogr","curl"]},"emoji":"🛰️"}}
 ---
 
 # Planet Satellite Imagery Order Skill
 
-Receives AOI from Telegram → uploads to Planet Explorer → selects right scenes → **visually checks cloud cover over target facility** → orders clipped to facility → polls until ready → downloads → converts to PNG → sends via Telegram.
+Receives AOI from Telegram → uploads to Planet Explorer → selects right scenes → **visually checks cloud cover over target facility** → orders full scenes → polls until ready → downloads → mosaics + clips locally → converts to PNG → sends via Telegram.
 
 Credentials in env: PL_EMAIL, PL_PASSWORD, TELEGRAM_BOT_TOKEN.
 
@@ -146,20 +146,15 @@ For each top candidate date (up to 3):
 
 ---
 
-## Step 6 — Place Order (Clip to Facility Only)
+## Step 6 — Place Order (Full Scenes, No Clip)
 
-The delivered imagery must show the **facility only**, not surrounding trees or buffer land.
-
-**Before placing the order:**
-- Look at the uploaded AOI geometry
-- If the AOI is already a tight polygon around the facility: use it as-is for the clip
-- If the AOI is a large bounding box or includes significant surrounding area: draw a tighter polygon in Planet Explorer around just the facility footprint, and use that as the clip geometry for this order
+Planet charges per clip operation — clipping on Planet's side wastes money. Order **full scenes** instead and clip locally for free. Full scene TIFs are also kept permanently for future re-cropping without re-ordering.
 
 **Order settings:**
 - Select chosen scenes
 - Order name format: DDMMYYYY_LocationName_Nsc  (e.g. 20022026_IsaTownTest_2sc)
 - Bundle: Visual (RGB GeoTIFF)
-- **Enable: Clip to AOI** (using the facility-tight polygon, not a loose bounding box)
+- **Do NOT enable Clip to AOI** — order full scenes only
 - Submit order
 - Note the order ID and order URL from the confirmation
 - Record the order start time (for elapsed time tracking in Step 7)
@@ -187,7 +182,11 @@ Send at: 5 min, 10 min, 15 min, 20 min, etc. — until order completes.
 1. Find the Download button or download links on the order page
 2. Click Download — Planet provides a zip file or individual GeoTIFF links
 3. Use `openclaw browser waitfordownload` or `openclaw browser download` to save the file
-4. Files save to: ~/planet_orders/[order_name]/
+4. Save full scene TIFs to the named scenes directory:
+
+        mkdir -p ~/planet_orders/[ORDER_NAME]/scenes/
+        # Move/extract downloaded TIFs here
+        # e.g. unzip order.zip -d ~/planet_orders/[ORDER_NAME]/scenes/
 
 **Alternative download via curl using browser cookies:**
 If clicking download does not work, extract cookies and use curl:
@@ -200,37 +199,46 @@ If clicking download does not work, extract cookies and use curl:
 
 ---
 
-## Step 8 — Process to PNG
+## Step 8 — Local Mosaic + Clip to PNG
 
-After downloading, clip the GeoTIFF tightly to the facility polygon before converting, to strip any residual surrounding area:
+Full scenes are stored locally. Mosaic all scenes first (fills any gaps between tiles), then clip to AOI, then convert to PNG. The output PNG is named after the order.
 
-    # Clip to facility polygon (remove surrounding land/trees):
-    gdalwarp -cutline /home/openclaw/planet_orders/aoi/aoi.geojson \
-             -crop_to_cutline -dstalpha \
-             input.tif clipped.tif
+    ORDER_DIR=~/planet_orders/[ORDER_NAME]
+    SCENES_DIR=$ORDER_DIR/scenes
+    AOI=/home/openclaw/planet_orders/aoi/aoi.geojson
 
-    # Convert to PNG:
-    gdal_translate -of PNG -scale clipped.tif output.png
+    # 1. Mosaic all full scenes (gdal_merge fills gaps between tiles — no black seams)
+    gdal_merge.py -o $ORDER_DIR/mosaic.tif $SCENES_DIR/*.tif
 
-    # Multiple scenes (mosaic first, then clip):
-    gdalwarp -of GTiff scene1.tif scene2.tif merged.tif
-    gdalwarp -cutline /home/openclaw/planet_orders/aoi/aoi.geojson \
-             -crop_to_cutline -dstalpha \
-             merged.tif clipped.tif
-    gdal_translate -of PNG -scale clipped.tif output.png
+    # 2. Clip mosaic to AOI (no -dstalpha — avoids black/transparent areas at edges)
+    gdalwarp -cutline $AOI -crop_to_cutline \
+             -dstnodata "0 0 0" \
+             $ORDER_DIR/mosaic.tif $ORDER_DIR/clipped.tif
 
-    # If downloaded as zip:
-    unzip order.zip -d ~/planet_orders/[order_name]/
+    # 3. Convert to PNG with order-specific name
+    gdal_translate -of PNG -scale $ORDER_DIR/clipped.tif \
+                   /home/openclaw/planet_orders/output/[ORDER_NAME].png
+
+    # If downloaded as zip, extract to scenes dir first:
+    unzip order.zip -d $SCENES_DIR/
+
+**Why this approach:**
+- `gdal_merge.py` mosaics scenes without gaps or black seams between tiles
+- No `-dstalpha` means no alpha channel is added, so edge areas are black fill (not transparent)
+- `-dstnodata "0 0 0"` fills any uncovered edge pixels with black instead of leaving them as nodata
+- Full scenes are preserved in `scenes/` for future re-clipping to any sub-AOI
 
 ---
 
 ## Step 9 — Upload and Send via Telegram
 
-**Always do BOTH: upload to catbox.moe for a permanent download link, AND send the file directly in Telegram.**
+**Output file is always `/home/openclaw/planet_orders/output/[ORDER_NAME].png`.**
+
+**Never send any PNG file that predates the current order's start time.** Always verify the file timestamp is newer than when the order was placed before sending.
 
 ### 9a — Upload to catbox.moe (high-quality permanent link)
 
-    CATBOX_URL=$(curl -4 -s -F "fileToUpload=@output.png" -F "reqtype=fileupload" https://catbox.moe/user/api.php)
+    CATBOX_URL=$(curl -4 -s -F "fileToUpload=@/home/openclaw/planet_orders/output/[ORDER_NAME].png" -F "reqtype=fileupload" https://catbox.moe/user/api.php)
     echo "Upload URL: $CATBOX_URL"
 
 catbox.moe returns a direct URL like `https://files.catbox.moe/xxxxxx.png`. If upload fails, proceed to 9b without a link.
@@ -239,13 +247,14 @@ catbox.moe returns a direct URL like `https://files.catbox.moe/xxxxxx.png`. If u
 
 OpenClaw only allows sending local files from the workspace directory:
 
-    cp output.png /home/openclaw/.openclaw/workspace/output.png
+    cp /home/openclaw/planet_orders/output/[ORDER_NAME].png \
+       /home/openclaw/.openclaw/workspace/[ORDER_NAME].png
 
 Then send the file:
 
     curl -s \
       -F "chat_id=CHAT_ID" \
-      -F "document=@/home/openclaw/.openclaw/workspace/output.png" \
+      -F "document=@/home/openclaw/.openclaw/workspace/[ORDER_NAME].png" \
       -F "caption=ORDER_NAME | DATE | N scenes | CLOUD% cloud | WxH px" \
       "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument"
 
@@ -257,7 +266,10 @@ Then send the file:
 
 If PNG > 50MB: compress first then re-copy:
 
-    convert -resize 50% output.png output.png && cp output.png /home/openclaw/.openclaw/workspace/output.png
+    convert -resize 50% /home/openclaw/planet_orders/output/[ORDER_NAME].png \
+            /home/openclaw/planet_orders/output/[ORDER_NAME].png
+    cp /home/openclaw/planet_orders/output/[ORDER_NAME].png \
+       /home/openclaw/.openclaw/workspace/[ORDER_NAME].png
 
 ---
 
@@ -274,7 +286,7 @@ Append to `/home/openclaw/planet_orders/orders.json` after every successful deli
         'ordered_at': 'TIMESTAMP',
         'name': 'ORDER_NAME',
         'location': 'LOCATION_NAME',
-        'file': 'output.png',
+        'file': '[ORDER_NAME].png',
         'size_mb': FILESIZE_MB,
         'catbox_url': 'CATBOX_URL',
         'sent': True
@@ -292,14 +304,18 @@ Then go fully idle.
 
 ## Crop Mode (any time)
 
-User sends "Crop last image to [coords]" or attaches a sub-AOI:
+User sends "Crop last image to [coords]" or attaches a sub-AOI. Use the stored full scenes in `~/planet_orders/[ORDER_NAME]/scenes/` — no need to re-order:
+
+    # Re-mosaic and clip to new sub-AOI:
+    gdal_merge.py -o /tmp/mosaic_temp.tif ~/planet_orders/[ORDER_NAME]/scenes/*.tif
+    gdalwarp -cutline sub.geojson -crop_to_cutline \
+             -dstnodata "0 0 0" \
+             /tmp/mosaic_temp.tif /tmp/clipped_temp.tif
+    gdal_translate -of PNG -scale /tmp/clipped_temp.tif \
+                   /home/openclaw/planet_orders/output/[ORDER_NAME]_crop.png
 
     # Bounding box crop:
     gdal_translate -projwin <ulx> <uly> <lrx> <lry> -of PNG -scale input.tif cropped.png
-
-    # Polygon crop:
-    gdalwarp -cutline sub.geojson -crop_to_cutline input.tif clipped.tif
-    gdal_translate -of PNG -scale clipped.tif cropped.png
 
 ---
 
