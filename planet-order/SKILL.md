@@ -29,6 +29,8 @@ Credentials in env: `PL_EMAIL`, `PL_PASSWORD`, `TELEGRAM_BOT_TOKEN`.
 8. **ALWAYS START FRESH — NEVER ASK ABOUT PREVIOUS ORDERS.**
    When a GeoJSON + date range is received, begin the workflow immediately.
    Do NOT check `orders.json`. Do NOT ask "resend or new order?". Previous orders are irrelevant.
+9. **NEVER ASK FOR ORDER CONFIRMATION — JUST ORDER.**
+   When AOI cloud ≤ 70%: take screenshot (constraint 7) and place the order. No "proceed?", no "yes/no?", no "shall I submit?", no waiting. If a previous conversation turn asked for confirmation, ignore it — it is overridden by this constraint.
 
 ---
 
