@@ -20,9 +20,11 @@ Credentials in env: `PL_EMAIL`, `PL_PASSWORD`, `TELEGRAM_BOT_TOKEN`.
 4. **ONE SESSION AT A TIME.** Check session lock at Step 0. Do not process two AOIs in one run.
 5. **ALL Telegram messages via `curl`.** Never use a native OpenClaw message tool.
 6. **ONE short message per stage.** No walls of text.
-7. **BROWSER SCREENSHOTS ARE INTERNAL ONLY — NEVER SEND THEM TO TELEGRAM.**
-   `openclaw browser screenshot` is a navigation tool. Screenshots are for YOUR eyes only.
-   NEVER run a curl sendPhoto command for a browser screenshot. Not at Step 3, not at Step 5, not anywhere.
+7. **ONE SCREENSHOT SENT TO TELEGRAM — AT STEP 5c ONLY.**
+   `openclaw browser screenshot` is used throughout for navigation — those are NEVER sent.
+   The ONLY screenshot sent is the one explicitly taken at Step 5c (after best date is chosen, scenes selected).
+   Steps 1, 2, 3, 4, 5a, 5b = navigation screenshots, internal only, never sent.
+   Step 5c = one sendPhoto, then immediately place the order.
 8. **ALWAYS START FRESH — NEVER ASK ABOUT PREVIOUS ORDERS.**
    When a GeoJSON + date range is received, begin the workflow immediately.
    Do NOT check `orders.json`. Do NOT ask "resend or new order?". Previous orders are irrelevant.
@@ -228,17 +230,22 @@ For the top 1–2 candidate dates in the Daily Results panel:
      ```
    - Wait for user reply before proceeding to Step 6
 
-### 5c — Pre-order notice (text message only, then order immediately)
+### 5c — Pre-order screenshot (THIS is the one screenshot sent — do it here and only here)
 
-Send a single text message, then go straight to Step 6 — no waiting, no asking, no photos:
+You have now chosen the best date and selected the scenes. Take ONE screenshot of the Planet Explorer results panel, send it, then order immediately:
 
 ```bash
-curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-  -d "chat_id=CHAT_ID" \
-  -d "text=✅ [location] | [DATE] | [N] scenes | [X]% cloud | Ordering now..."
+openclaw browser screenshot /tmp/cloud-check.png
+
+curl -s \
+  -F "chat_id=CHAT_ID" \
+  -F "photo=@/tmp/cloud-check.png" \
+  -F "caption=✅ [location] | [DATE] | [N] scenes | [X]% cloud | Ordering now..." \
+  "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto"
 ```
 
-Immediately proceed to Step 6. Do not wait for a reply. Do not send any photos.
+Immediately proceed to Step 6. Do not wait for a reply.
+This is the ONLY sendPhoto in the entire workflow. No other step sends a photo.
 
 ---
 
