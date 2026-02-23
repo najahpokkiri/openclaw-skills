@@ -6,7 +6,7 @@ metadata: {"openclaw":{"requires":{"bins":["gdal_translate","gdalwarp","ogr2ogr"
 
 # Planet Satellite Imagery Order Skill
 
-Receives AOI from Telegram → uploads to Planet Explorer → selects right scenes → **visually checks cloud cover over target facility** → orders full scenes → polls until ready → downloads → mosaics + clips locally → converts to PNG → sends via Telegram.
+Receives AOI from Telegram → uploads to Planet Explorer → selects minimum scenes with lowest scene cloud % → orders full scenes → polls until ready → downloads → mosaics + clips to AOI locally → converts to PNG → sends via Telegram.
 
 Credentials in env: PL_EMAIL, PL_PASSWORD, TELEGRAM_BOT_TOKEN.
 
@@ -34,12 +34,6 @@ Credentials in env: PL_EMAIL, PL_PASSWORD, TELEGRAM_BOT_TOKEN.
 - If an error occurs at any stage: one-line error message, then stop
 - If no clear date found: ask user to confirm before ordering (see Step 5b)
 - Do NOT send screenshots to the user
-
----
-
-## Key Principle: Clip to Facility, Not the Whole AOI
-
-The AOI file may include surrounding land, trees, or buffer zones the user does not care about. The target is the **facility or structure** inside the AOI — an airport, building complex, industrial site, etc. All cloud checks and all clips must focus on that target, ignoring irrelevant surrounding area.
 
 ---
 
@@ -117,14 +111,17 @@ Replace `<FILENAME_FROM_TELEGRAM>` with the exact filename attached to the most 
     curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getFile?file_id=FILE_ID"
     # Returns: { "result": { "file_path": "documents/file_123.geojson" } }
 
-    # Download file
+    # Download file to INCOMING path
     curl -s -o /home/openclaw/planet_orders/aoi/incoming.geojson \
       "https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/documents/file_123.geojson"
 
-Convert if needed:
-    ogr2ogr -f GeoJSON aoi.geojson input.kml    # KML
-    ogr2ogr -f GeoJSON aoi.geojson input.shp    # Shapefile
-    # If multi-feature GeoJSON: extract FIRST feature only (always overwrites — no stale AOI)
+**⚠️ MANDATORY — you MUST run this exact block. No skipping, no substitutions:**
+
+    # Convert KML/SHP if needed, then ALWAYS write canonical aoi.geojson:
+    # KML:  ogr2ogr -f GeoJSON /home/openclaw/planet_orders/aoi/incoming.geojson input.kml
+    # SHP:  ogr2ogr -f GeoJSON /home/openclaw/planet_orders/aoi/incoming.geojson input.shp
+
+    # ALWAYS run this Python block — it writes aoi.geojson (the file clip_order.py uses):
     MULTI_AOI=$(python3 -c "
 import json, sys
 raw = json.load(open('/home/openclaw/planet_orders/aoi/incoming.geojson'))
@@ -140,6 +137,9 @@ print(n)
         -d "chat_id=CHAT_ID" \
         -d "text=⚠️ Your file had ${MULTI_AOI} AOIs — only the first one will be ordered."
     fi
+
+    # VERIFY aoi.geojson was written — if missing, STOP:
+    [ -f /home/openclaw/planet_orders/aoi/aoi.geojson ] || { echo "ERROR: aoi.geojson not written"; exit 1; }
 
 **After AOI is saved, send (via curl):**
     curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
@@ -191,49 +191,25 @@ cat /home/openclaw/.openclaw/workspace/current-session.json
 
 Confirm the AOI you are about to search scenes for exactly matches the `"file"` field. If it does not match, STOP and send to Telegram: "⚠️ Session mismatch at scene search — aborting."
 
-**Goal: fewest scenes from best single day covering >= 90% of AOI, with clear sky over the target facility itself.**
+**Goal: fewest scenes from best single day covering >= 90% of AOI, with lowest scene cloud %.**
 
 ### 5a — Group and rank candidate dates
 1. Only scenes that actually intersect AOI geometry
 2. Group by date; find minimum scenes for >= 90% coverage
-3. Rank: coverage % desc → scene cloud % asc → recency
+3. Rank by: coverage % descending → scene cloud % ascending → most recent
 
-### 5b — Visual facility cloud check (MANDATORY for each candidate date)
+### 5b — Handle no clear results
+If all dates have scene cloud > 50%:
+- Pick lowest cloud % date available
+- Message user: "⚠️ Best available: [DATE], [X]% cloud. Proceed? (yes/no)"
+- Wait for confirmation before ordering
 
-Planet's scene-level cloud % covers the whole tile, not just your target. You MUST visually verify.
-
-**Important:** The AOI may be a large polygon containing surrounding trees, fields, or open land. You only care about the **primary target facility** (airport, building complex, industrial site, etc.) visible within the AOI. Clouds over surrounding vegetation or non-target land do NOT count.
-
-For each top candidate date (up to 3):
-1. Click the scene in Planet Explorer to select/preview it
-2. Zoom the map to the AOI bounding box so the target facility fills the viewport
-3. Take a browser screenshot of the map at this zoom level
-4. Visually locate the **primary target structure/facility** within the AOI
-5. Estimate what percentage of the **target facility itself** is obscured by cloud or cloud shadow — ignore cloud over surrounding land, trees, or fields
-6. Record: date, scene cloud %, estimated facility cloud %
-
-**Decision rule (cloud over target facility only):**
-- Facility cloud estimate < 30%: ✅ proceed with this date
-- Facility cloud estimate 30–70%: ⚠️ borderline — prefer a clearer date if available
-- Facility cloud estimate > 70%: ❌ skip this date, try next candidate
-
-**If all candidates have facility cloud > 70%:**
-- Pick the date with the lowest facility cloud estimate
-- Message the user:
-  ```
-  ⚠️ Best available date: [YYYY-MM-DD]
-  Scene cloud: [X]% | Estimated facility cloud: [Y]%
-  No fully clear date found in range. Proceed anyway? (reply yes/no)
-  ```
-- Wait for user confirmation before ordering
-
-### 5c — Pre-order notification (once clear date found)
+### 5c — Pre-order notification
 
     Found coverage for [location]
     Best date: [YYYY-MM-DD]
     Scenes to order: [N] (covers [X]% of AOI)
     Scene cloud cover: [Y]%
-    Estimated facility cloud cover: [Z]%
     Ordering now...
 
 ---
@@ -311,21 +287,27 @@ If clicking download does not work, extract cookies and use curl:
 
 ## Step 8 — Local Mosaic + Clip to PNG
 
-Full scenes are stored locally. Mosaic all scenes first (fills any gaps between tiles), then clip to AOI, then convert to PNG. The output PNG is named after the order.
+⚠️ **YOU MUST USE ONLY `clip_order.py` FOR THIS STEP. DO NOT call gdalwarp, gdal_merge, or gdal_translate directly. DO NOT invent your own clipping workflow. ONLY the command below.**
 
-    # Send status before clipping (via curl):
+    # Send status (via curl):
     curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
       -d "chat_id=CHAT_ID" \
       -d "text=🖼️ Converting to PNG..."
 
-    # Mosaic + clip to AOI + convert to PNG via Python helper.
-    # Handles: path drift (searches both ~/planet_orders/output/NAME and ~/planet_orders/NAME),
-    # zip extraction, recursive TIF find (PSScene/SCENE_ID/ nesting), gdalwarp + gdal_translate.
+    # THE ONLY ALLOWED COMMAND FOR CLIPPING:
     if ! PNG_PATH=$(python3 /home/openclaw/planet_orders/clip_order.py \
       "[ORDER_NAME]" \
       /home/openclaw/planet_orders/aoi/aoi.geojson); then
-      echo "ERROR: clip_order.py failed — check stderr above"; exit 1
+      # clip_order.py failed — send error to Telegram and STOP. Do NOT send any image.
+      curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        -d "chat_id=CHAT_ID" \
+        -d "text=❌ Clipping failed. Check server logs."
+      exit 1
     fi
+
+    # clip_order.py auto-handles: zip extraction, recursive TIF find (PSScene/SCENE_ID/ nesting),
+    # invalid AOI geometry (-makevalid), path drift, gdalwarp + gdal_translate.
+    # Output PNG is at: /home/openclaw/planet_orders/output/[ORDER_NAME].png
 
 **Why this approach:**
 - `clip_order.py` searches `~/planet_orders/output/NAME/` and `~/planet_orders/NAME/` — handles agent path drift
@@ -420,7 +402,7 @@ printf 'null\n' \
 
 ## Step 11 — Confirm and Go Idle
 
-Send summary: order name, date, scene cloud %, facility cloud %, scenes, file size, dimensions.
+Send summary: order name, date, scene cloud %, scenes ordered, file size, dimensions.
 Then go fully idle.
 
 ---
